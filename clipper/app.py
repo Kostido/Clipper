@@ -7,9 +7,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QRectF, QSettings, QSize, QUrl, QTimer
-from PySide6.QtGui import (QColor, QDesktopServices, QIcon, QKeySequence,
-                           QPainter, QPainterPath, QPixmap, QShortcut)
+from PySide6.QtCore import QEvent, Qt, QRectF, QSettings, QSize, QUrl, QTimer
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QPainter,
+                           QPainterPath, QPixmap)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -22,7 +22,7 @@ from . import __version__, downloader, ffmpeg_tools, storage, updater
 from .timecode import format_tc
 from .timeline import TimelineWidget
 from .workers import (DownloadWorker, ExportWorker, PreviewProxyWorker,
-                      UpdateCheckWorker, UpdateDownloadWorker)
+                      ThumbnailWorker, UpdateCheckWorker, UpdateDownloadWorker)
 
 APP_NAME = "Clipper"
 PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast",
@@ -31,6 +31,11 @@ RESOLUTIONS = [("Как в исходнике", 0), ("2160p", 2160), ("1440p", 1
                ("1080p", 1080), ("720p", 720), ("480p", 480)]
 FPS_CHOICES = [("Как в исходнике", 0.0), ("60", 60.0), ("50", 50.0),
                ("30", 30.0), ("25", 25.0), ("24", 24.0)]
+# Битрейт понятнее, чем CRF: прямо задаёт размер файла и качество картинки.
+BITRATES = [("Авто (по разрешению)", 0), ("1,5 Мбит/с — экономно", 1500),
+            ("3 Мбит/с", 3000), ("5 Мбит/с — обычный", 5000),
+            ("8 Мбит/с — высокий", 8000), ("12 Мбит/с", 12000),
+            ("20 Мбит/с — максимум", 20000)]
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".flv",
                   ".mpg", ".mpeg", ".wmv", ".ts", ".m2ts", ".3gp", ".ogv"}
 BROWSERS = [downloader.BROWSER_AUTO, "Не использовать",
@@ -185,6 +190,8 @@ class MainWindow(QMainWindow):
         self._preview_was_playing = False
         self._pending_seek: int | None = None
         self.proxy_worker: PreviewProxyWorker | None = None
+        self.thumb_worker: ThumbnailWorker | None = None
+        self.thumbnails: list = []          # (секунда, файл) для быстрого превью
 
         self.setAcceptDrops(True)
         self._build_ui()
@@ -229,6 +236,19 @@ class MainWindow(QMainWindow):
         if slot:
             button.clicked.connect(slot)
         return button
+
+    @staticmethod
+    def _mono_label(sample: str) -> QLabel:
+        """Метка с цифрами: моноширинный шрифт и ширина по самому длинному
+        значению, иначе соседние кнопки дёргаются при каждом кадре."""
+        label = QLabel(sample)
+        label.setObjectName("mono")
+        font = QFont("Menlo" if sys.platform == "darwin" else "Consolas")
+        font.setStyleHint(QFont.Monospace)
+        font.setPointSize(10 if sys.platform == "darwin" else 9)
+        label.setFont(font)
+        label.setFixedWidth(label.fontMetrics().horizontalAdvance(sample) + 6)
+        return label
 
     @staticmethod
     def _label(text: str, kind: str = "hint") -> QLabel:
@@ -284,19 +304,36 @@ class MainWindow(QMainWindow):
         about.triggered.connect(self.show_about)
 
     def _build_shortcuts(self) -> None:
-        """I и O — метки, пробел — пауза: руки не уходят с клавиатуры."""
-        for keys, slot in (
-            ("I", self.mark_in),
-            ("O", self.mark_out),
-            ("Space", self.toggle_play),
-            ("Left", lambda: self.nudge(-1.0)),
-            ("Right", lambda: self.nudge(1.0)),
-            ("Shift+Left", lambda: self.nudge(-0.1)),   # точная подводка вместо кнопок
-            ("Shift+Right", lambda: self.nudge(0.1)),
-        ):
-            shortcut = QShortcut(QKeySequence(keys), self)
-            shortcut.setContext(Qt.ApplicationShortcut)
-            shortcut.activated.connect(slot)
+        """I, O и пробел ловим фильтром событий, а не QShortcut.
+
+        На macOS одиночные клавиши без модификаторов до QShortcut просто не
+        доходят — их разбирает системное меню. Фильтр видит нажатие раньше.
+        """
+        self._keymap = {
+            (Qt.Key_I, Qt.NoModifier): self.mark_in,
+            (Qt.Key_O, Qt.NoModifier): self.mark_out,
+            (Qt.Key_Space, Qt.NoModifier): self.toggle_play,
+            (Qt.Key_Left, Qt.NoModifier): lambda: self.nudge(-1.0),
+            (Qt.Key_Right, Qt.NoModifier): lambda: self.nudge(1.0),
+            (Qt.Key_Left, Qt.ShiftModifier): lambda: self.nudge(-0.1),
+            (Qt.Key_Right, Qt.ShiftModifier): lambda: self.nudge(0.1),
+        }
+        QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 — Qt API
+        if event.type() != QEvent.KeyPress or not self.isActiveWindow():
+            return super().eventFilter(obj, event)
+        focused = QApplication.focusWidget()
+        # В поле ввода клавиши принадлежат тексту, а не плееру.
+        if isinstance(focused, (QLineEdit, QPlainTextEdit, QSpinBox, QComboBox)):
+            return super().eventFilter(obj, event)
+        modifiers = event.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier
+                                         | Qt.AltModifier | Qt.MetaModifier)
+        action = self._keymap.get((event.key(), modifiers))
+        if action:
+            action()
+            return True
+        return super().eventFilter(obj, event)
 
     def _build_source_card(self) -> QFrame:
         card = self._card()
@@ -416,6 +453,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.video_widget, 1)
 
         # Живёт поверх области видео и исчезает, когда файл загружен.
+        # Кадр из раскадровки: показывается, пока тянут метку.
+        self.scrub_view = QLabel(self.video_widget)
+        self.scrub_view.setAlignment(Qt.AlignCenter)
+        self.scrub_view.setStyleSheet("background:#000; border:none;")
+        self.scrub_view.setVisible(False)
+
         self.drop_hint = QLabel("Перетащите сюда видео или ссылку", self.video_widget)
         self.drop_hint.setAlignment(Qt.AlignCenter)
         self.drop_hint.setStyleSheet(
@@ -461,7 +504,7 @@ class MainWindow(QMainWindow):
         self.play_btn.clicked.connect(self.toggle_play)
         row.addWidget(self.play_btn)
 
-        self.time_label = self._label("0:00:00.000 / 0:00:00.000", "mono")
+        self.time_label = self._mono_label("00:00:00.000 / 00:00:00.000")
         row.addWidget(self.time_label)
         row.addSpacing(6)
 
@@ -474,7 +517,9 @@ class MainWindow(QMainWindow):
         row.addWidget(self._ghost("Сбросить", self.reset_range))
 
         row.addStretch(1)
-        self.range_label = self._label("Фрагмент: —", "mono")
+        self.range_label = self._mono_label(
+            "Фрагмент: 00:00:00.000 → 00:00:00.000   (000.0 с)")
+        self.range_label.setText("Фрагмент: —")
         row.addWidget(self.range_label)
         row.addSpacing(10)
 
@@ -499,14 +544,15 @@ class MainWindow(QMainWindow):
         row.addWidget(self._label("H.264", "section"))
         row.addSpacing(8)
 
-        self.crf_spin = QSpinBox()
-        self.crf_spin.setRange(14, 32)
-        self.crf_spin.setValue(20)
-        self.crf_spin.setPrefix("CRF ")
-        self.crf_spin.setFixedWidth(100)
-        self.crf_spin.setToolTip(
-            "Меньше = лучше качество и больше файл. 18–23 — рабочий диапазон.")
-        row.addWidget(self.crf_spin)
+        self.bitrate_combo = QComboBox()
+        for label, _ in BITRATES:
+            self.bitrate_combo.addItem(label)
+        self.bitrate_combo.setCurrentIndex(3)
+        self.bitrate_combo.setFixedWidth(210)
+        self.bitrate_combo.setToolTip(
+            "Сколько данных в секунду. Больше — чётче картинка и тяжелее файл: "
+            "минута при 5 Мбит/с весит примерно 38 МБ.")
+        row.addWidget(self.bitrate_combo)
 
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(PRESETS)
@@ -579,7 +625,8 @@ class MainWindow(QMainWindow):
         self.quality_combo.setCurrentText(
             self.settings.value("quality", "Максимальное", type=str)
         )
-        self.crf_spin.setValue(int(self.settings.value("crf", 20)))
+        self.bitrate_combo.setCurrentIndex(
+            int(self.settings.value("bitrate_index", 3)))
         self.preset_combo.setCurrentText(self.settings.value("preset", "medium", type=str))
         self.browser_combo.setCurrentText(
             self.settings.value("browser", downloader.BROWSER_AUTO, type=str)
@@ -595,7 +642,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt API
         self.settings.setValue("download_dir", self.dir_edit.text())
         self.settings.setValue("quality", self.quality_combo.currentText())
-        self.settings.setValue("crf", self.crf_spin.value())
+        self.settings.setValue("bitrate_index", self.bitrate_combo.currentIndex())
         self.settings.setValue("preset", self.preset_combo.currentText())
         self.settings.setValue("browser", self.browser_combo.currentText())
         self.settings.setValue("proxy", self.proxy_edit.text().strip())
@@ -603,7 +650,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue(
             "cookies_file", str(self.cookies_file) if self.cookies_file else "")
         self.settings.sync()          # ini пишется отложенно — сбрасываем сразу
-        for worker in (self.download_worker, self.export_worker, self.proxy_worker):
+        for worker in (self.download_worker, self.export_worker,
+                       self.proxy_worker, self.thumb_worker):
             if worker and worker.isRunning():
                 worker.cancel()
                 worker.wait(3000)
@@ -752,8 +800,9 @@ class MainWindow(QMainWindow):
         self._place_drop_hint()
 
     def _place_drop_hint(self) -> None:
-        self.drop_hint.setGeometry(0, 0, self.video_widget.width(),
-                                   self.video_widget.height())
+        area = (0, 0, self.video_widget.width(), self.video_widget.height())
+        self.drop_hint.setGeometry(*area)
+        self.scrub_view.setGeometry(*area)
 
     def load_media(self, path: Path) -> None:
         self.source = path
@@ -770,6 +819,7 @@ class MainWindow(QMainWindow):
                 f"{self.info.fps:.2f} к/с, {format_tc(self.info.duration)}"
             )
         self._stop_proxy()
+        self._start_thumbnails(path)
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         if ffmpeg_tools.needs_preview_proxy(self.info):
             self._start_preview_proxy(path)
@@ -817,6 +867,49 @@ class MainWindow(QMainWindow):
     def _on_proxy_failed(self, message: str) -> None:
         self.log(f"Превью не получилось: {message}")
         self.statusBar().showMessage("Не удалось подготовить превью")
+
+
+    # ------------------------------------------------------- раскадровка ----
+    def _start_thumbnails(self, path: Path) -> None:
+        """Нарезаем кадры в фоне: перемотка плеера слишком медленная."""
+        if self.thumb_worker and self.thumb_worker.isRunning():
+            self.thumb_worker.cancel()
+            self.thumb_worker.wait(1500)
+        self.thumbnails = []
+        target = Path(tempfile.gettempdir()) / "clipper_thumbs" / path.stem
+        worker = ThumbnailWorker(path, target)
+        worker.ready.connect(self._on_thumbnails_ready)
+        self.thumb_worker = worker
+        worker.start()
+
+    def _on_thumbnails_ready(self, frames: list) -> None:
+        """Приходит дважды: сперва редкая сетка, потом плотная."""
+        if not frames or len(frames) < len(self.thumbnails):
+            return
+        self.thumbnails = frames
+        self.log(f"Предпросмотр: {len(frames)} кадров.")
+
+    def _thumbnail_at(self, ms: int) -> Path | None:
+        if not self.thumbnails:
+            return None
+        seconds = ms / 1000
+        # Кадры идут с равным шагом — берём ближайший по времени.
+        index = min(range(len(self.thumbnails)),
+                    key=lambda i: abs(self.thumbnails[i][0] - seconds))
+        return self.thumbnails[index][1]
+
+    def _show_scrub_frame(self, ms: int) -> bool:
+        path = self._thumbnail_at(ms)
+        if not path:
+            return False
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return False
+        self.scrub_view.setPixmap(pixmap.scaled(
+            self.scrub_view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.scrub_view.setVisible(True)
+        self.scrub_view.raise_()
+        return True
 
     def toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -867,6 +960,10 @@ class MainWindow(QMainWindow):
             )
             if self._preview_was_playing:
                 self.player.pause()
+        if self._show_scrub_frame(ms):
+            # Готовый кадр рисуется мгновенно, плеер при этом не трогаем:
+            # его перемотка не успевает за мышью и картинка отстаёт.
+            return
         self._pending_seek = ms
         if not self._seek_timer.isActive():
             self._apply_pending_seek()      # первый кадр — сразу, без задержки
@@ -881,6 +978,7 @@ class MainWindow(QMainWindow):
 
     def _on_preview_finished(self) -> None:
         """Метку отпустили — возвращаемся туда, где стоит плеер."""
+        self.scrub_view.setVisible(False)
         self._seek_timer.stop()
         self._pending_seek = None
         if self._preview_return is None:
@@ -946,7 +1044,7 @@ class MainWindow(QMainWindow):
         start, end = self.trim_range()
         length = max(0.0, end - start)
         self.range_label.setText(
-            f"Фрагмент: {format_tc(start)} → {format_tc(end)}   ({length:.3f} с)"
+            f"Фрагмент: {format_tc(start)} → {format_tc(end)}   ({length:6.1f} с)"
             if length else "Фрагмент: —"
         )
 
@@ -1054,7 +1152,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- export ---
     def _on_copy_toggled(self, checked: bool) -> None:
-        for widget in (self.crf_spin, self.preset_combo, self.res_combo, self.fps_combo):
+        for widget in (self.bitrate_combo, self.preset_combo, self.res_combo, self.fps_combo):
             widget.setEnabled(not checked)
 
     def start_export(self) -> None:
@@ -1088,7 +1186,7 @@ class MainWindow(QMainWindow):
         settings = ffmpeg_tools.ExportSettings(
             start=start,
             end=end,
-            crf=self.crf_spin.value(),
+            video_bitrate=BITRATES[self.bitrate_combo.currentIndex()][1],
             preset=self.preset_combo.currentText(),
             scale_height=RESOLUTIONS[self.res_combo.currentIndex()][1],
             fps=FPS_CHOICES[self.fps_combo.currentIndex()][1],

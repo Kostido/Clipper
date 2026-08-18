@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -160,12 +161,25 @@ class FFmpegMissingError(RuntimeError):
 class ExportSettings:
     start: float
     end: float
-    crf: int = 20
+    video_bitrate: int = 0         # кбит/с; 0 = подобрать по разрешению
     preset: str = "medium"
     audio_bitrate: str = "192k"
     scale_height: int = 0          # 0 = как в исходнике
     fps: float = 0.0               # 0 = как в исходнике
     copy_mode: bool = False        # быстрая резка без перекодирования
+
+
+# Разумный битрейт под высоту кадра — если пользователь не выбрал свой.
+_BITRATE_BY_HEIGHT = ((2160, 24000), (1440, 14000), (1080, 8000),
+                      (720, 5000), (480, 2500), (0, 1500))
+
+
+def default_bitrate(height: int) -> int:
+    """Кбит/с для H.264 при данной высоте кадра."""
+    for min_height, bitrate in _BITRATE_BY_HEIGHT:
+        if height >= min_height:
+            return bitrate
+    return 1500
 
 
 _TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+\.?\d*)")
@@ -191,10 +205,15 @@ def build_export_command(src: Path, dst: Path, s: ExportSettings) -> list[str]:
             filters.append(f"fps={s.fps:g}")
         if filters:
             cmd += ["-vf", ",".join(filters)]
+        bitrate = s.video_bitrate or default_bitrate(probe(src).height)
         cmd += [
             "-c:v", "libx264",
             "-preset", s.preset,
-            "-crf", str(s.crf),
+            # Постоянный битрейт: размер файла предсказуем. maxrate с bufsize
+            # держат поток в рамках, иначе x264 разгоняется на сложных сценах.
+            "-b:v", f"{bitrate}k",
+            "-maxrate", f"{bitrate}k",
+            "-bufsize", f"{bitrate * 2}k",
             "-profile:v", "high",
             "-level", "4.1",
             "-pix_fmt", "yuv420p",
@@ -319,3 +338,55 @@ def make_preview_proxy(
     if process.returncode != 0 or not dst.exists():
         raise RuntimeError("ffmpeg не смог подготовить превью.")
     return dst
+
+
+def extract_thumbnails(
+    src: Path,
+    out_dir: Path,
+    count: int = 120,
+    height: int = 180,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> list:
+    """Раскадровка для отзывчивого предпросмотра.
+
+    Плеер перематывается медленно, поэтому пока метку тянут, показываем
+    заранее вырезанные кадры. Каждый кадр берём отдельным быстрым переходом
+    (-ss до -i) и делаем это в несколько потоков: декодировать весь файл
+    ради сотни картинок слишком долго — на трёхминутном ролике это минута.
+    """
+    ffmpeg = ffmpeg_path()
+    if not ffmpeg:
+        return []
+    duration = probe(src).duration
+    if duration <= 0:
+        return []
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("*.jpg"):
+        old.unlink(missing_ok=True)
+
+    count = max(2, min(count, int(duration * 2)))
+    step = duration / count
+    jobs = [(index, index * step) for index in range(count)]
+
+    def grab(job: tuple) -> tuple:
+        index, moment = job
+        if should_cancel and should_cancel():
+            return moment, None
+        target = out_dir / f"{index:05d}.jpg"
+        cmd = [
+            str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", f"{moment:.3f}", "-i", str(src), "-frames:v", "1",
+            "-vf", f"scale=-2:{height}", "-q:v", "6", str(target),
+        ]
+        result = subprocess.run(cmd, capture_output=True, **_popen_kwargs())
+        if result.returncode != 0 or not target.exists():
+            return moment, None
+        return moment, target
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        frames = list(pool.map(grab, jobs))
+
+    if should_cancel and should_cancel():
+        return []
+    return [(moment, path) for moment, path in frames if path]
