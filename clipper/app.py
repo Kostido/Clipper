@@ -8,8 +8,8 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QRectF, QSettings, QSize, QUrl, QTimer
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QPainter,
-                           QPainterPath, QPixmap)
+from PySide6.QtGui import (QActionGroup, QColor, QDesktopServices, QFont,
+                           QIcon, QPainter, QPainterPath, QPixmap)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__, downloader, ffmpeg_tools, storage, updater
+from . import i18n
+from .i18n import tr
 from .timecode import format_tc
 from .timeline import TimelineWidget
 from .workers import (DownloadWorker, ExportWorker, PreviewProxyWorker,
@@ -27,18 +29,18 @@ from .workers import (DownloadWorker, ExportWorker, PreviewProxyWorker,
 APP_NAME = "Clipper"
 PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast",
            "medium", "slow", "slower"]
-RESOLUTIONS = [("Как в исходнике", 0), ("2160p", 2160), ("1440p", 1440),
+RESOLUTIONS = [(tr("Как в исходнике"), 0), ("2160p", 2160), ("1440p", 1440),
                ("1080p", 1080), ("720p", 720), ("480p", 480)]
-FPS_CHOICES = [("Как в исходнике", 0.0), ("60", 60.0), ("50", 50.0),
+FPS_CHOICES = [(tr("Как в исходнике"), 0.0), ("60", 60.0), ("50", 50.0),
                ("30", 30.0), ("25", 25.0), ("24", 24.0)]
 # Битрейт понятнее, чем CRF: прямо задаёт размер файла и качество картинки.
-BITRATES = [("Авто (по разрешению)", 0), ("1,5 Мбит/с — экономно", 1500),
-            ("3 Мбит/с", 3000), ("5 Мбит/с — обычный", 5000),
-            ("8 Мбит/с — высокий", 8000), ("12 Мбит/с", 12000),
-            ("20 Мбит/с — максимум", 20000)]
+BITRATES = [(tr("Авто (по разрешению)"), 0), (tr("1,5 Мбит/с — экономно"), 1500),
+            (tr("3 Мбит/с"), 3000), (tr("5 Мбит/с — обычный"), 5000),
+            (tr("8 Мбит/с — высокий"), 8000), (tr("12 Мбит/с"), 12000),
+            (tr("20 Мбит/с — максимум"), 20000)]
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".flv",
                   ".mpg", ".mpeg", ".wmv", ".ts", ".m2ts", ".3gp", ".ogv"}
-BROWSERS = [downloader.BROWSER_AUTO, "Не использовать",
+BROWSERS = [downloader.BROWSER_AUTO, tr("Не использовать"),
             "chrome", "edge", "firefox", "brave", "opera", "vivaldi"]
 
 
@@ -169,7 +171,7 @@ def default_download_dir() -> Path:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} — скачать, обрезать, отрендерить")
+        self.setWindowTitle(tr("{app} — скачать, обрезать, отрендерить").format(app=APP_NAME))
         self.resize(1100, 760)
 
         ini = storage.settings_file()
@@ -222,7 +224,7 @@ class MainWindow(QMainWindow):
         root.addLayout(self._build_footer())
 
         self.setCentralWidget(central)
-        self.statusBar().showMessage("Готов к работе")
+        self.statusBar().showMessage(tr("Готов к работе"))
 
     @staticmethod
     def _card() -> QFrame:
@@ -268,7 +270,7 @@ class MainWindow(QMainWindow):
         self.log_view.setFixedHeight(110)
         self.log_view.setVisible(False)
 
-        self.log_btn = self._ghost("Журнал ▾", self._toggle_log,
+        self.log_btn = self._ghost(tr("Журнал ▾"), self._toggle_log,
                                    "Показать подробный лог операций")
 
         footer = QVBoxLayout()
@@ -286,26 +288,37 @@ class MainWindow(QMainWindow):
     def _toggle_log(self) -> None:
         visible = not self.log_view.isVisible()
         self.log_view.setVisible(visible)
-        self.log_btn.setText("Журнал ▴" if visible else "Журнал ▾")
+        self.log_btn.setText(tr("Журнал ▴") if visible else tr("Журнал ▾"))
 
     def _build_menu(self) -> None:
-        menu = self.menuBar().addMenu("Программа")
-        menu.addAction("Настройки…").triggered.connect(self.show_settings)
+        menu = self.menuBar().addMenu(tr("Программа"))
+        menu.addAction(tr("Настройки…")).triggered.connect(self.show_settings)
         if sys.platform == "darwin":
             # На macOS без этого разрешения не прочитать cookies Safari.
-            menu.addAction("Доступ к cookies…").triggered.connect(self.open_privacy_settings)
-            menu.addAction("Перенести в «Программы»…").triggered.connect(
+            menu.addAction(tr("Доступ к cookies…")).triggered.connect(self.open_privacy_settings)
+            menu.addAction(tr("Перенести в «Программы»…")).triggered.connect(
                 lambda: self.offer_install())
         menu.addSeparator()
-        check = menu.addAction("Проверить обновления")
+        check = menu.addAction(tr("Проверить обновления"))
         check.triggered.connect(lambda: self.check_updates(silent=False))
 
-        self.autoupdate_action = menu.addAction("Проверять при запуске")
+        self.autoupdate_action = menu.addAction(tr("Проверять при запуске"))
         self.autoupdate_action.setCheckable(True)
         self.autoupdate_action.setChecked(True)
 
+        language = menu.addMenu(tr("Язык"))
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        current = self.settings.value("language", "", type=str)
+        for code, title in (("", tr("Как в системе")), ("ru", "Русский"), ("en", "English")):
+            action = language.addAction(title)
+            action.setCheckable(True)
+            action.setChecked(code == current)
+            action.triggered.connect(lambda _=False, c=code: self.set_language(c))
+            group.addAction(action)
+
         menu.addSeparator()
-        about = menu.addAction("О программе")
+        about = menu.addAction(tr("О программе"))
         about.triggered.connect(self.show_about)
 
     def _build_shortcuts(self) -> None:
@@ -350,33 +363,35 @@ class MainWindow(QMainWindow):
         row.setSpacing(8)
         self.url_edit = QLineEdit()
         self.url_edit.setObjectName("url")
-        self.url_edit.setPlaceholderText("Ссылка на видео или перетащите файл в окно")
+        self.url_edit.setPlaceholderText(tr("Ссылка на видео или перетащите файл в окно"))
         self.url_edit.returnPressed.connect(self.start_download)
         row.addWidget(self.url_edit, 1)
 
         self.quality_combo = QComboBox()
-        self.quality_combo.addItems(list(downloader.QUALITY_FORMATS.keys()))
+        for key in downloader.QUALITY_FORMATS:
+            # Подпись переводим, а значением остаётся исходный ключ словаря.
+            self.quality_combo.addItem(tr(key), key)
         self.quality_combo.setFixedWidth(150)
-        self.quality_combo.setToolTip("Качество загрузки")
+        self.quality_combo.setToolTip(tr("Качество загрузки"))
         row.addWidget(self.quality_combo)
 
-        self.download_btn = QPushButton("Скачать")
+        self.download_btn = QPushButton(tr("Скачать"))
         self.download_btn.setObjectName("primary")
         self.download_btn.setDefault(True)
         self.download_btn.clicked.connect(self.start_download)
         row.addWidget(self.download_btn)
 
-        self.open_btn = self._ghost("Открыть файл", self.open_local_file)
+        self.open_btn = self._ghost(tr("Открыть файл"), self.open_local_file)
         row.addWidget(self.open_btn)
 
-        self.settings_btn = self._ghost("Настройки", self.show_settings,
-                                        "Папка загрузок, cookies, прокси")
+        self.settings_btn = self._ghost(tr("Настройки"), self.show_settings,
+                                        tr("Папка загрузок, cookies, прокси"))
         row.addWidget(self.settings_btn)
         layout.addLayout(row)
 
         self.dl_progress = QProgressBar()
         self.dl_progress.setTextVisible(True)
-        self.dl_progress.setFormat("Скачивание: %p%")
+        self.dl_progress.setFormat(tr("Скачивание: %p%"))
         self.dl_progress.setVisible(False)
         layout.addWidget(self.dl_progress)
         return card
@@ -384,25 +399,26 @@ class MainWindow(QMainWindow):
     def _build_settings_dialog(self) -> QDialog:
         """Всё редко используемое живёт в отдельном окне, а не в главном."""
         dialog = QDialog(self)
-        dialog.setWindowTitle("Настройки")
+        dialog.setWindowTitle(tr("Настройки"))
         dialog.setMinimumWidth(520)
         outer = QVBoxLayout(dialog)
         outer.setContentsMargins(18, 16, 18, 16)
         outer.setSpacing(14)
 
-        outer.addWidget(self._label("ЗАГРУЗКА", "section"))
+        outer.addWidget(self._label(tr("ЗАГРУЗКА"), "section"))
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(10)
 
-        grid.addWidget(self._label("Папка"), 0, 0)
+        grid.addWidget(self._label(tr("Папка")), 0, 0)
         self.dir_edit = QLineEdit(str(default_download_dir()))
         grid.addWidget(self.dir_edit, 0, 1)
-        grid.addWidget(self._ghost("Обзор", self.choose_dir), 0, 2)
+        grid.addWidget(self._ghost(tr("Обзор"), self.choose_dir), 0, 2)
 
-        grid.addWidget(self._label("Cookies"), 1, 0)
+        grid.addWidget(self._label(tr("Cookies")), 1, 0)
         self.browser_combo = QComboBox()
-        self.browser_combo.addItems(BROWSERS)
+        for name in BROWSERS:
+            self.browser_combo.addItem(tr(name), name)
         self.browser_combo.setToolTip(
             "«Авто» — программа сама возьмёт cookies из установленного браузера, "
             "если сайт потребует вход в аккаунт. Браузер при этом должен быть закрыт."
@@ -411,16 +427,16 @@ class MainWindow(QMainWindow):
 
         self.cookies_file: Path | None = None
         self.cookies_btn = self._ghost(
-            "Файл cookies", self.choose_cookies_file,
+            tr("Файл cookies"), self.choose_cookies_file,
             "Файл cookies.txt (формат Netscape) — запасной путь, когда браузер "
             "не отдаёт cookies напрямую. Экспортируется расширением вроде "
             "«Get cookies.txt LOCALLY».")
         grid.addWidget(self.cookies_btn, 1, 2)
 
-        grid.addWidget(self._label("Прокси"), 2, 0)
+        grid.addWidget(self._label(tr("Прокси")), 2, 0)
         self.proxy_edit = QLineEdit()
         self.proxy_edit.setPlaceholderText(
-            "пусто — как в Windows; например socks5://127.0.0.1:10808")
+            tr("пусто — как в Windows; например socks5://127.0.0.1:10808"))
         self.proxy_edit.setToolTip(
             "Некоторые сайты (TikTok, Instagram) не отдают видео на IP датацентров "
             "и VPN. Здесь можно направить скачивание через свой прокси."
@@ -430,11 +446,11 @@ class MainWindow(QMainWindow):
         outer.addLayout(grid)
 
         outer.addWidget(self._label(
-            "Настройки сохраняются автоматически и применяются к следующей загрузке."))
+            tr("Настройки сохраняются автоматически и применяются к следующей загрузке.")))
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        close = QPushButton("Готово")
+        close = QPushButton(tr("Готово"))
         close.setObjectName("primary")
         close.clicked.connect(dialog.accept)
         buttons.addWidget(close)
@@ -464,7 +480,7 @@ class MainWindow(QMainWindow):
         self.scrub_view.setStyleSheet("background:#000; border:none;")
         self.scrub_view.setVisible(False)
 
-        self.drop_hint = QLabel("Перетащите сюда видео или ссылку", self.video_widget)
+        self.drop_hint = QLabel(tr("Перетащите сюда видео или ссылку"), self.video_widget)
         self.drop_hint.setAlignment(Qt.AlignCenter)
         self.drop_hint.setStyleSheet(
             f"color:{MUTED}; font-size:14px; background:transparent; border:none;")
@@ -476,7 +492,7 @@ class MainWindow(QMainWindow):
         self.player.positionChanged.connect(self._on_position_changed)
         self.player.durationChanged.connect(self._on_duration_changed)
         self.player.errorOccurred.connect(
-            lambda _e, msg: self.log(f"Проигрыватель: {msg}") if msg else None
+            lambda _e, msg: self.log(tr("Проигрыватель: {message}").format(message=msg)) if msg else None
         )
 
         # Перематывать на каждое движение мыши — рвано; копим и применяем по таймеру.
@@ -505,7 +521,7 @@ class MainWindow(QMainWindow):
         self.play_btn.setFixedSize(34, 34)          # размер задаём кодом: в QSS
         self.play_btn.setIconSize(QSize(16, 16))    # min-width меряет контент
         self.play_btn.setIcon(_glyph_icon("play"))
-        self.play_btn.setToolTip("Пробел — играть или пауза")
+        self.play_btn.setToolTip(tr("Пробел — играть или пауза"))
         self.play_btn.clicked.connect(self.toggle_play)
         row.addWidget(self.play_btn)
 
@@ -513,18 +529,18 @@ class MainWindow(QMainWindow):
         row.addWidget(self.time_label)
         row.addSpacing(6)
 
-        row.addWidget(self._ghost("Начало", self.mark_in,
-                                  "Клавиша I — начало фрагмента по текущей позиции"))
-        row.addWidget(self._ghost("Конец", self.mark_out,
-                                  "Клавиша O — конец фрагмента по текущей позиции"))
-        row.addWidget(self._ghost("Фрагмент", self.preview_clip,
-                                  "Проиграть выделенный фрагмент"))
-        row.addWidget(self._ghost("Сбросить", self.reset_range))
+        row.addWidget(self._ghost(tr("Начало"), self.mark_in,
+                                  tr("Клавиша I — начало фрагмента по текущей позиции")))
+        row.addWidget(self._ghost(tr("Конец"), self.mark_out,
+                                  tr("Клавиша O — конец фрагмента по текущей позиции")))
+        row.addWidget(self._ghost(tr("Фрагмент"), self.preview_clip,
+                                  tr("Проиграть выделенный фрагмент")))
+        row.addWidget(self._ghost(tr("Сбросить"), self.reset_range))
 
         row.addStretch(1)
         self.range_label = self._mono_label(
             "Фрагмент: 00:00:00.000 → 00:00:00.000   (000.0 с)")
-        self.range_label.setText("Фрагмент: —")
+        self.range_label.setText(tr("Фрагмент: —"))
         row.addWidget(self.range_label)
         row.addSpacing(10)
 
@@ -532,7 +548,7 @@ class MainWindow(QMainWindow):
         self.volume_slider.setFixedWidth(90)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(80)
-        self.volume_slider.setToolTip("Громкость")
+        self.volume_slider.setToolTip(tr("Громкость"))
         self.volume_slider.valueChanged.connect(lambda v: self.audio_out.setVolume(v / 100))
         self.audio_out.setVolume(0.8)
         row.addWidget(self.volume_slider)
@@ -546,7 +562,7 @@ class MainWindow(QMainWindow):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        row.addWidget(self._label("H.264", "section"))
+        row.addWidget(self._label(tr("H.264"), "section"))
         row.addSpacing(8)
 
         self.bitrate_combo = QComboBox()
@@ -563,24 +579,24 @@ class MainWindow(QMainWindow):
         self.preset_combo.addItems(PRESETS)
         self.preset_combo.setCurrentText("medium")
         self.preset_combo.setFixedWidth(124)
-        self.preset_combo.setToolTip("Скорость кодирования (preset)")
+        self.preset_combo.setToolTip(tr("Скорость кодирования (preset)"))
         row.addWidget(self.preset_combo)
 
         self.res_combo = QComboBox()
         for label, _ in RESOLUTIONS:
             self.res_combo.addItem(label)
         self.res_combo.setFixedWidth(152)
-        self.res_combo.setToolTip("Разрешение результата")
+        self.res_combo.setToolTip(tr("Разрешение результата"))
         row.addWidget(self.res_combo)
 
         self.fps_combo = QComboBox()
         for label, _ in FPS_CHOICES:
             self.fps_combo.addItem(label)
         self.fps_combo.setFixedWidth(140)
-        self.fps_combo.setToolTip("Кадры в секунду")
+        self.fps_combo.setToolTip(tr("Кадры в секунду"))
         row.addWidget(self.fps_combo)
 
-        self.copy_check = QCheckBox("Без перекодирования")
+        self.copy_check = QCheckBox(tr("Без перекодирования"))
         self.copy_check.setToolTip(
             "Мгновенная нарезка копированием потока. Режет по ключевым кадрам, "
             "поэтому границы могут сместиться на пару секунд.")
@@ -588,18 +604,18 @@ class MainWindow(QMainWindow):
         row.addWidget(self.copy_check)
 
         row.addStretch(1)
-        self.open_folder_btn = self._ghost("Папка", self.open_output_dir,
-                                          "Открыть папку с результатом")
+        self.open_folder_btn = self._ghost(tr("Папка"), self.open_output_dir,
+                                          tr("Открыть папку с результатом"))
         row.addWidget(self.open_folder_btn)
 
-        self.export_btn = QPushButton("Отрендерить фрагмент")
+        self.export_btn = QPushButton(tr("Отрендерить фрагмент"))
         self.export_btn.setObjectName("primary")
         self.export_btn.clicked.connect(self.start_export)
         row.addWidget(self.export_btn)
         layout.addLayout(row)
 
         self.export_progress = QProgressBar()
-        self.export_progress.setFormat("Рендер: %p%")
+        self.export_progress.setFormat(tr("Рендер: %p%"))
         self.export_progress.setVisible(False)
         layout.addWidget(self.export_progress)
         return card
@@ -618,9 +634,9 @@ class MainWindow(QMainWindow):
     def _check_ffmpeg(self) -> None:
         path = ffmpeg_tools.ffmpeg_path()
         if path:
-            self.log(f"ffmpeg: {path}")
+            self.log(tr("ffmpeg: {path}").format(path=path))
         else:
-            self.log("ffmpeg не найден — скачивание в высоком качестве и рендер работать не будут.")
+            self.log(tr("ffmpeg не найден — скачивание в высоком качестве и рендер работать не будут."))
             QMessageBox.warning(self, APP_NAME, str(ffmpeg_tools.FFmpegMissingError()))
 
     def _restore_settings(self) -> None:
@@ -628,14 +644,14 @@ class MainWindow(QMainWindow):
         if saved_dir:
             self.dir_edit.setText(saved_dir)
         self.quality_combo.setCurrentText(
-            self.settings.value("quality", "Максимальное", type=str)
+            self.settings.value("quality", tr("Максимальное"), type=str)
         )
         self.bitrate_combo.setCurrentIndex(
             int(self.settings.value("bitrate_index", 3)))
         self.preset_combo.setCurrentText(self.settings.value("preset", "medium", type=str))
-        self.browser_combo.setCurrentText(
-            self.settings.value("browser", downloader.BROWSER_AUTO, type=str)
-        )
+        index = self.browser_combo.findData(
+            self.settings.value("browser", downloader.BROWSER_AUTO, type=str))
+        self.browser_combo.setCurrentIndex(max(0, index))
         self.autoupdate_action.setChecked(
             self.settings.value("autoupdate", True, type=bool)
         )
@@ -646,10 +662,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt API
         self.settings.setValue("download_dir", self.dir_edit.text())
-        self.settings.setValue("quality", self.quality_combo.currentText())
+        self.settings.setValue("quality", self.quality_combo.currentData())
         self.settings.setValue("bitrate_index", self.bitrate_combo.currentIndex())
         self.settings.setValue("preset", self.preset_combo.currentText())
-        self.settings.setValue("browser", self.browser_combo.currentText())
+        self.settings.setValue("browser", self.browser_combo.currentData())
         self.settings.setValue("proxy", self.proxy_edit.text().strip())
         self.settings.setValue("autoupdate", self.autoupdate_action.isChecked())
         self.settings.setValue(
@@ -664,26 +680,26 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------- download ----
     def choose_dir(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Папка для загрузок", self.dir_edit.text())
+        chosen = QFileDialog.getExistingDirectory(self, tr("Папка для загрузок"), self.dir_edit.text())
         if chosen:
             self.dir_edit.setText(chosen)
 
     def _set_cookies_file(self, path: Path | None) -> None:
         self.cookies_file = path
-        self.cookies_btn.setText(f"Cookies: {path.name}" if path else "Файл cookies")
+        self.cookies_btn.setText(f"Cookies: {path.name}" if path else tr("Файл cookies"))
 
     def choose_cookies_file(self) -> None:
         if self.cookies_file:
             # Повторный клик по выбранному файлу — сбрасываем.
             self._set_cookies_file(None)
-            self.log("Файл cookies отключён.")
+            self.log(tr("Файл cookies отключён."))
             return
         chosen, _ = QFileDialog.getOpenFileName(
-            self, "Файл cookies (Netscape cookies.txt)", "", "cookies.txt (*.txt);;Все файлы (*)"
+            self, tr("Файл cookies (Netscape cookies.txt)"), "", tr("cookies.txt (*.txt);;Все файлы (*)")
         )
         if chosen:
             self._set_cookies_file(Path(chosen))
-            self.log(f"Использую cookies из {chosen}")
+            self.log(tr("Использую cookies из {path}").format(path=chosen))
 
     def start_download(self) -> None:
         if self.download_worker and self.download_worker.isRunning():
@@ -691,53 +707,53 @@ class MainWindow(QMainWindow):
             return
         url = downloader.find_url(self.url_edit.text())
         if not url:
-            QMessageBox.information(self, APP_NAME, "Вставьте ссылку на видео.")
+            QMessageBox.information(self, APP_NAME, tr("Вставьте ссылку на видео."))
             return
         out_dir = Path(self.dir_edit.text().strip() or default_download_dir())
-        browser = self.browser_combo.currentText()
+        browser = self.browser_combo.currentData()
         browser = None if browser == "Не использовать" else browser
 
         self.dl_progress.setValue(0)
         self.dl_progress.setVisible(True)
-        self.download_btn.setText("Отменить")
-        self.statusBar().showMessage("Скачиваю…")
-        self.log(f"Скачиваю {url}")
+        self.download_btn.setText(tr("Отменить"))
+        self.statusBar().showMessage(tr("Скачиваю…"))
+        self.log(tr("Скачиваю {url}").format(url=url))
 
         worker = DownloadWorker(
-            url, out_dir, self.quality_combo.currentText(), browser, self.cookies_file,
+            url, out_dir, self.quality_combo.currentData(), browser, self.cookies_file,
             self.proxy_edit.text().strip() or None,
         )
         worker.progress.connect(self._on_download_progress)
         worker.log.connect(self.log)
         worker.finished_ok.connect(self._on_download_done)
         worker.failed.connect(self._on_download_failed)
-        worker.finished.connect(lambda: self.download_btn.setText("Скачать"))
+        worker.finished.connect(lambda: self.download_btn.setText(tr("Скачать")))
         self.download_worker = worker
         worker.start()
 
     def _on_download_progress(self, percent: float, speed: str) -> None:
         self.dl_progress.setValue(int(percent))
-        self.statusBar().showMessage(f"Скачиваю… {percent:.0f}% {speed}".strip())
+        self.statusBar().showMessage(tr("Скачиваю… {percent:.0f}% {speed}").format(percent=percent, speed=speed).strip())
 
     def _on_download_done(self, result: downloader.DownloadResult) -> None:
         self.dl_progress.setValue(100)
         self.dl_progress.setVisible(False)
-        self.log(f"Готово: {result.path}")
+        self.log(tr("Готово: {path_str}").format(path_str=result.path))
         if result.cookies_source:
-            self.log(f"Сработали cookies: {result.cookies_source}")
-        self.statusBar().showMessage(f"Скачано: {result.title}")
+            self.log(tr("Сработали cookies: {source}").format(source=result.cookies_source))
+        self.statusBar().showMessage(tr("Скачано: {title}").format(title=result.title))
         self.load_media(result.path)
 
     def _on_download_failed(self, message: str) -> None:
         self.dl_progress.setVisible(False)
-        self.statusBar().showMessage("Ошибка скачивания")
-        self.log(f"Ошибка: {message}")
-        QMessageBox.critical(self, APP_NAME, f"Не удалось скачать видео:{chr(10)}{chr(10)}{message}")
+        self.statusBar().showMessage(tr("Ошибка скачивания"))
+        self.log(tr("Ошибка: {message}").format(message=message))
+        QMessageBox.critical(self, APP_NAME, tr("Не удалось скачать видео:") + chr(10) + chr(10) + message)
 
     def open_local_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Выберите видео", self.dir_edit.text(),
-            "Видео (*.mp4 *.mkv *.mov *.webm *.avi *.m4v *.flv);;Все файлы (*.*)",
+            self, tr("Выберите видео"), self.dir_edit.text(),
+            tr("Видео (*.mp4 *.mkv *.mov *.webm *.avi *.m4v *.flv);;Все файлы (*.*)"),
         )
         if path:
             self.load_media(Path(path))
@@ -766,10 +782,10 @@ class MainWindow(QMainWindow):
             style = VIDEO_ACTIVE_STYLE if self.source else VIDEO_IDLE_STYLE
         self.video_widget.setStyleSheet(style)
         if active:
-            self.drop_hint.setText("Отпустите — откроется в плеере")
+            self.drop_hint.setText(tr("Отпустите — откроется в плеере"))
             self.drop_hint.setVisible(True)
         else:
-            self.drop_hint.setText("Перетащите сюда видео или ссылку")
+            self.drop_hint.setText(tr("Перетащите сюда видео или ссылку"))
             self.drop_hint.setVisible(self.source is None)
 
     def dragEnterEvent(self, event) -> None:
@@ -791,8 +807,8 @@ class MainWindow(QMainWindow):
         if files:
             event.acceptProposedAction()
             if len(files) > 1:
-                self.log(f"Перетащено файлов: {len(files)} — открываю первый.")
-            self.log(f"Открываю {files[0].name}")
+                self.log(tr("Перетащено файлов: {count} — открываю первый.").format(count=len(files)))
+            self.log(tr("Открываю {name}").format(name=files[0].name))
             self.load_media(files[0])
         elif links:
             event.acceptProposedAction()
@@ -817,7 +833,7 @@ class MainWindow(QMainWindow):
             self.info = ffmpeg_tools.probe(path)
         except Exception as exc:  # noqa: BLE001
             self.info = None
-            self.log(f"Не удалось прочитать параметры файла: {exc}")
+            self.log(tr("Не удалось прочитать параметры файла: {error}").format(error=exc))
         if self.info:
             self.log(
                 f"Файл: {path.name} — {self.info.width}x{self.info.height}, "
@@ -847,16 +863,16 @@ class MainWindow(QMainWindow):
     def _start_preview_proxy(self, path: Path) -> None:
         """Плеер Windows не тянет AV1/VP9/Opus — смотрим лёгкую H.264-копию."""
         codecs = f"{self.info.vcodec}/{self.info.acodec}" if self.info else "?"
-        self.log(f"Кодек {codecs} встроенный плеер не воспроизводит — готовлю превью…")
-        self.statusBar().showMessage("Готовлю превью для просмотра…")
+        self.log(tr("Кодек {codecs} встроенный плеер не воспроизводит — готовлю превью…").format(codecs=codecs))
+        self.statusBar().showMessage(tr("Готовлю превью для просмотра…"))
         target = Path(tempfile.gettempdir()) / "clipper_preview" / f"{path.stem}.preview.mp4"
         if target.exists() and target.stat().st_mtime >= path.stat().st_mtime:
-            self.log("Превью уже готово, беру из кэша.")
+            self.log(tr("Превью уже готово, беру из кэша."))
             self._use_preview(target)
             return
         worker = PreviewProxyWorker(path, target)
         worker.progress.connect(
-            lambda p: self.statusBar().showMessage(f"Готовлю превью… {p:.0f}%"))
+            lambda p: self.statusBar().showMessage(tr("Готовлю превью… {percent:.0f}%").format(percent=p)))
         worker.finished_ok.connect(self._use_preview)
         worker.failed.connect(self._on_proxy_failed)
         self.proxy_worker = worker
@@ -866,12 +882,12 @@ class MainWindow(QMainWindow):
         position = self.player.position()
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         QTimer.singleShot(300, lambda: self.player.setPosition(position))
-        self.log(f"Превью готово: {path.name} (обрезка и рендер идут из оригинала)")
-        self.statusBar().showMessage("Превью готово — оригинал для рендера сохранён")
+        self.log(tr("Превью готово: {name} (обрезка и рендер идут из оригинала)").format(name=path.name))
+        self.statusBar().showMessage(tr("Превью готово — оригинал для рендера сохранён"))
 
     def _on_proxy_failed(self, message: str) -> None:
-        self.log(f"Превью не получилось: {message}")
-        self.statusBar().showMessage("Не удалось подготовить превью")
+        self.log(tr("Превью не получилось: {message}").format(message=message))
+        self.statusBar().showMessage(tr("Не удалось подготовить превью"))
 
 
     # ------------------------------------------------------- раскадровка ----
@@ -892,7 +908,7 @@ class MainWindow(QMainWindow):
         if not frames or len(frames) < len(self.thumbnails):
             return
         self.thumbnails = frames
-        self.log(f"Предпросмотр: {len(frames)} кадров.")
+        self.log(tr("Предпросмотр: {count} кадров.").format(count=len(frames)))
 
     def _thumbnail_at(self, ms: int) -> Path | None:
         if not self.thumbnails:
@@ -1049,8 +1065,8 @@ class MainWindow(QMainWindow):
         start, end = self.trim_range()
         length = max(0.0, end - start)
         self.range_label.setText(
-            f"Фрагмент: {format_tc(start)} → {format_tc(end)}   ({length:6.1f} с)"
-            if length else "Фрагмент: —"
+            tr("Фрагмент: {start} → {end}   ({length:6.1f} с)").format(start=format_tc(start), end=format_tc(end), length=length)
+            if length else tr("Фрагмент: —")
         )
 
 
@@ -1061,7 +1077,7 @@ class MainWindow(QMainWindow):
             return
         self._update_silent = silent
         if not silent:
-            self.statusBar().showMessage("Проверяю обновления…")
+            self.statusBar().showMessage(tr("Проверяю обновления…"))
         worker = UpdateCheckWorker()
         worker.result.connect(self._on_update_checked)
         worker.failed.connect(self._on_update_check_failed)
@@ -1069,25 +1085,25 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_update_check_failed(self, message: str) -> None:
-        self.log(f"Проверка обновлений: {message}")
+        self.log(tr("Проверка обновлений: {message}").format(message=message))
         if not self._update_silent:
             QMessageBox.warning(self, APP_NAME, message)
 
     def _on_update_checked(self, release) -> None:
         if release is None:
-            self.log("Обновления: релизов на GitHub пока нет.")
+            self.log(tr("Обновления: релизов на GitHub пока нет."))
             if not self._update_silent:
                 QMessageBox.information(
                     self, APP_NAME,
-                    "На GitHub ещё нет опубликованных релизов — обновляться не с чего.",
+                    tr("На GitHub ещё нет опубликованных релизов — обновляться не с чего."),
                 )
             return
 
         if not updater.is_newer(release):
-            self.log(f"Обновления: установлена последняя версия {__version__}.")
+            self.log(tr("Обновления: установлена последняя версия {version}.").format(version=__version__))
             if not self._update_silent:
                 QMessageBox.information(
-                    self, APP_NAME, f"У вас последняя версия — {__version__}.")
+                    self, APP_NAME, tr("У вас последняя версия — {version}.").format(version=__version__))
             return
 
         notes = release.notes[:600] + ("…" if len(release.notes) > 600 else "")
@@ -1110,8 +1126,8 @@ class MainWindow(QMainWindow):
         self._start_update_download(release)
 
     def _start_update_download(self, release) -> None:
-        self.log(f"Качаю обновление {release.name}…")
-        self.dl_progress.setFormat("Обновление: %p%")
+        self.log(tr("Качаю обновление {name}…").format(name=release.name))
+        self.dl_progress.setFormat(tr("Обновление: %p%"))
         self.dl_progress.setValue(0)
         self.dl_progress.setVisible(True)
         worker = UpdateDownloadWorker(release)
@@ -1123,24 +1139,24 @@ class MainWindow(QMainWindow):
 
     def _reset_dl_progress(self) -> None:
         self.dl_progress.setVisible(False)
-        self.dl_progress.setFormat("Скачивание: %p%")
+        self.dl_progress.setFormat(tr("Скачивание: %p%"))
 
     def _on_update_failed(self, message: str) -> None:
         self._reset_dl_progress()
-        self.log(f"Обновление не удалось: {message}")
-        QMessageBox.warning(self, APP_NAME, f"Обновление не удалось: {message}")
+        self.log(tr("Обновление не удалось: {message}").format(message=message))
+        QMessageBox.warning(self, APP_NAME, tr("Обновление не удалось: {message}").format(message=message))
 
     def _on_update_downloaded(self, staged, release) -> None:
         self._reset_dl_progress()
         try:
             updater.apply_update(staged)
         except Exception as exc:  # noqa: BLE001
-            self._on_update_failed(f"не удалось заменить программу: {exc}")
+            self._on_update_failed(tr("не удалось заменить программу: {error}").format(error=exc))
             return
-        self.log(f"Обновление {release.name} установлено.")
+        self.log(tr("Обновление {name} установлено.").format(name=release.name))
         answer = QMessageBox.question(
             self, APP_NAME,
-            f"Версия {release.name} установлена. Перезапустить сейчас?",
+            tr("Версия {name} установлена. Перезапустить сейчас?").format(name=release.name),
         )
         if answer == QMessageBox.Yes:
             updater.restart()
@@ -1150,7 +1166,7 @@ class MainWindow(QMainWindow):
         """Открывает раздел «Полный доступ к диску» в настройках macOS."""
         QDesktopServices.openUrl(QUrl(
             "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"))
-        self.log("Добавьте Clipper в «Полный доступ к диску» и перезапустите программу.")
+        self.log(tr("Добавьте Clipper в «Полный доступ к диску» и перезапустите программу."))
 
 
     def offer_install(self, head: str = "") -> None:
@@ -1167,9 +1183,9 @@ class MainWindow(QMainWindow):
         try:
             installed = updater.install_to_applications()
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, f"Не удалось перенести: {exc}")
+            QMessageBox.warning(self, APP_NAME, tr("Не удалось перенести: {error}").format(error=exc))
             return
-        self.log(f"Программа перенесена: {installed}")
+        self.log(tr("Программа перенесена: {path}").format(path=installed))
         QMessageBox.information(
             self, APP_NAME,
             f"Готово: {installed}" + chr(10) + chr(10)
@@ -1177,6 +1193,14 @@ class MainWindow(QMainWindow):
               "папки загрузок — дальше обновления будут ставиться сами.")
         updater.launch(installed)
         self.close()
+
+    def set_language(self, code: str) -> None:
+        """Язык применяется целиком при следующем запуске — так проще и честнее,
+        чем пересобирать интерфейс на лету."""
+        self.settings.setValue("language", code)
+        self.settings.sync()
+        QMessageBox.information(
+            self, APP_NAME, tr("Язык интерфейса изменится после перезапуска программы."))
 
     def show_about(self) -> None:
         QMessageBox.information(self, APP_NAME, f"""{APP_NAME} {__version__}
@@ -1214,7 +1238,7 @@ class MainWindow(QMainWindow):
         if dst_path.suffix.lower() != ".mp4":
             dst_path = dst_path.with_suffix(".mp4")
         if dst_path.resolve() == self.source.resolve():
-            QMessageBox.warning(self, APP_NAME, "Нельзя записать результат поверх исходного файла.")
+            QMessageBox.warning(self, APP_NAME, tr("Нельзя записать результат поверх исходного файла."))
             return
 
         settings = ffmpeg_tools.ExportSettings(
@@ -1228,21 +1252,21 @@ class MainWindow(QMainWindow):
         )
         self.export_progress.setValue(0)
         self.export_progress.setVisible(True)
-        self.export_btn.setText("Отменить рендер")
-        self.statusBar().showMessage("Рендерю…")
+        self.export_btn.setText(tr("Отменить рендер"))
+        self.statusBar().showMessage(tr("Рендерю…"))
 
         worker = ExportWorker(self.source, dst_path, settings)
         worker.progress.connect(lambda p: self.export_progress.setValue(int(p)))
         worker.log.connect(self.log)
         worker.finished_ok.connect(self._on_export_done)
         worker.failed.connect(self._on_export_failed)
-        worker.finished.connect(lambda: self.export_btn.setText("Отрендерить фрагмент…"))
+        worker.finished.connect(lambda: self.export_btn.setText(tr("Отрендерить фрагмент…")))
         self.export_worker = worker
         worker.start()
 
     def _on_export_done(self, path: str) -> None:
         self.export_progress.setValue(100)
-        self.statusBar().showMessage("Готово")
+        self.statusBar().showMessage(tr("Готово"))
         self.log(f"Сохранено: {path}")
         answer = QMessageBox.question(
             self, APP_NAME, f"Фрагмент сохранён:\n{path}\n\nОткрыть папку?",
@@ -1252,8 +1276,8 @@ class MainWindow(QMainWindow):
             reveal(Path(path))
 
     def _on_export_failed(self, message: str) -> None:
-        self.statusBar().showMessage("Ошибка рендера")
-        self.log(f"Ошибка: {message}")
+        self.statusBar().showMessage(tr("Ошибка рендера"))
+        self.log(tr("Ошибка: {message}").format(message=message))
         QMessageBox.critical(self, APP_NAME, f"Не удалось отрендерить фрагмент:\n\n{message}")
 
     def open_output_dir(self) -> None:
@@ -1332,11 +1356,11 @@ def _apply_theme(app: QApplication) -> None:
     try:
         import qdarktheme
     except ImportError:
-        THEME_NOTE = "Тема qdarktheme не найдена — интерфейс в системном оформлении."
+        THEME_NOTE = tr("Тема qdarktheme не найдена — интерфейс в системном оформлении.")
     else:
         qdarktheme.setup_theme("dark", corner_shape="rounded",
                                custom_colors={"primary": ACCENT})
-        THEME_NOTE = "Тема: qdarktheme (тёмная)"
+        THEME_NOTE = tr("Тема: qdarktheme (тёмная)")
     app.setStyleSheet(app.styleSheet() + QSS)
 
 
@@ -1360,6 +1384,9 @@ def main() -> int:
         return _selftest(target)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    # Язык выбираем до создания окна: строки берутся при сборке интерфейса.
+    saved = QSettings("Clipper", "Clipper").value("language", "", type=str)
+    i18n.set_language(saved)
     _apply_theme(app)
     icon_path = Path(__file__).resolve().parent.parent / "assets" / "clipper.ico"
     if icon_path.exists():

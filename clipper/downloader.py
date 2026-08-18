@@ -214,7 +214,7 @@ def download(
     auto = cookies_from_browser == BROWSER_AUTO and not cookies_file
     sources: list = []
     if cookies_file:
-        sources.append((f"файл {cookies_file.name}", {"cookiefile": str(cookies_file)}))
+        sources.append((f"{cookies_file.name}", {"cookiefile": str(cookies_file)}))
     if cookies_from_browser and cookies_from_browser != BROWSER_AUTO:
         sources.append((cookies_from_browser, {"cookiesfrombrowser": (cookies_from_browser,)}))
     if auto:

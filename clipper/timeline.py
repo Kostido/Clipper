@@ -5,6 +5,8 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
+from .i18n import tr
+
 TRACK_BG = QColor("#232a3a")
 TRACK_OUT = QColor("#12151c")      # части ролика вне выделения
 SELECTION = QColor("#4c8dff")
@@ -172,7 +174,7 @@ class TimelineWidget(QWidget):
 
         if not self._duration:
             painter.setPen(QPen(TEXT.darker(160)))
-            painter.drawText(track, Qt.AlignCenter, "Видео не загружено")
+            painter.drawText(track, Qt.AlignCenter, tr("Видео не загружено"))
             return
 
         x_in, x_out = self._x_of(self._in), self._x_of(self._out)
