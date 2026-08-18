@@ -6,7 +6,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, r"D:\#WORK\01.PLUGINS . Programs\Clipper")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import os
 
