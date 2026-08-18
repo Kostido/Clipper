@@ -72,7 +72,27 @@ def main() -> int:
     updater.cleanup_old()
     assert not (installed_dir / "Clipper.app.old").exists(), "старая версия осталась"
 
-    print("4) битый архив не принимается")
+    print("4) перенос из временной копии macOS")
+    translocated = workspace / "AppTranslocation" / "ABC-123" / "d"
+    translocated.mkdir(parents=True)
+    moved_bundle = _fake_bundle(translocated, "версия-из-загрузок")
+    updater.macos_bundle = lambda: moved_bundle
+    assert updater.is_translocated(), "временная копия не распознана"
+    assert not updater.can_self_update(), "из временной копии обновляться нельзя"
+
+    home = workspace / "home"
+    (home / "Applications").mkdir(parents=True)
+    updater.applications_dir = lambda: home / "Applications"
+    installed = updater.install_to_applications()
+    assert installed.is_dir(), "программа не перенесена"
+    assert os.access(installed / "Contents" / "MacOS" / "Clipper", os.X_OK),         "после переноса потеряно право на запуск"
+    print(f"   перенесено в {installed}")
+
+    updater.macos_bundle = lambda: installed
+    assert not updater.is_translocated(), "перенесённая копия всё ещё временная"
+    assert updater.can_self_update(), "перенесённая копия должна обновляться сама"
+
+    print("5) битый архив не принимается")
     broken = workspace / "broken.zip"
     broken.write_text("<html>404</html>", encoding="utf-8")
     try:

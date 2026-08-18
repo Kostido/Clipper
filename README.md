@@ -23,9 +23,9 @@ Windows и macOS. Без установки, без рекламы, без об�
 | [`Clipper-portable-win64.zip`](https://github.com/Kostido/Clipper/releases/latest) | Windows — настройки и загрузки в своей папке |
 | [`Clipper-macos.zip`](https://github.com/Kostido/Clipper/releases/latest) | macOS 11+ — внутри `Clipper.app` |
 
-> macOS: первый запуск — правый клик по `Clipper.app` → **Открыть** (нет подписи Apple).
-> Если YouTube ругается на встроенные компоненты:
-> `xattr -dr com.apple.quarantine /Applications/Clipper.app`
+> macOS: перетащите `Clipper.app` в «Программы», затем правый клик → **Открыть**
+> (нет подписи Apple). Запуск прямо из папки загрузок macOS выполняет из временной
+> копии — оттуда не работает автообновление; программа предложит перенести себя сама.
 
 ## Как работать
 

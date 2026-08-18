@@ -202,6 +202,9 @@ class MainWindow(QMainWindow):
         self._check_theme()
         self._check_ffmpeg()
         updater.cleanup_old()          # подчищаем прошлую версию после обновления
+        if updater.is_translocated():
+            self.log("Программа запущена из временной копии macOS — перенесите её "
+                     "в «Программы», иначе обновления ставиться не будут.")
         if self.autoupdate_action.isChecked():
             QTimer.singleShot(1500, lambda: self.check_updates(silent=True))
 
@@ -291,6 +294,8 @@ class MainWindow(QMainWindow):
         if sys.platform == "darwin":
             # На macOS без этого разрешения не прочитать cookies Safari.
             menu.addAction("Доступ к cookies…").triggered.connect(self.open_privacy_settings)
+            menu.addAction("Перенести в «Программы»…").triggered.connect(
+                lambda: self.offer_install())
         menu.addSeparator()
         check = menu.addAction("Проверить обновления")
         check.triggered.connect(lambda: self.check_updates(silent=False))
@@ -1089,6 +1094,9 @@ class MainWindow(QMainWindow):
         head = f"""Доступна версия {release.name} (у вас {__version__}).
 
 {notes}"""
+        if updater.is_translocated():
+            self.offer_install(head)
+            return
         if not updater.can_self_update():
             # Из исходников подменять нечего — ведём в релизы.
             QMessageBox.information(self, APP_NAME, head + """
@@ -1143,6 +1151,32 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl(
             "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"))
         self.log("Добавьте Clipper в «Полный доступ к диску» и перезапустите программу.")
+
+
+    def offer_install(self, head: str = "") -> None:
+        """Из временной копии обновиться нельзя — предлагаем перенести программу."""
+        target = updater.applications_dir() / "Clipper.app"
+        question = ((head + chr(10) + chr(10)) if head else "") + (
+            "Программа запущена из временной копии — так macOS поступает с "
+            "приложениями из интернета, пока их не перенесли к себе. "
+            "Поэтому обновиться на месте нельзя." + chr(10) + chr(10)
+            + f"Перенести Clipper в «Программы» ({target.parent}) и перезапустить?"
+        )
+        if QMessageBox.question(self, APP_NAME, question) != QMessageBox.Yes:
+            return
+        try:
+            installed = updater.install_to_applications()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, f"Не удалось перенести: {exc}")
+            return
+        self.log(f"Программа перенесена: {installed}")
+        QMessageBox.information(
+            self, APP_NAME,
+            f"Готово: {installed}" + chr(10) + chr(10)
+            + "Сейчас откроется перенесённая копия. Прежнюю можно удалить из "
+              "папки загрузок — дальше обновления будут ставиться сами.")
+        updater.launch(installed)
+        self.close()
 
     def show_about(self) -> None:
         QMessageBox.information(self, APP_NAME, f"""{APP_NAME} {__version__}

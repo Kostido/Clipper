@@ -40,6 +40,53 @@ def macos_bundle() -> Optional[Path]:
     return None
 
 
+def is_translocated() -> bool:
+    """macOS запускает скачанное приложение из временной копии «только чтение».
+
+    Так работает Gatekeeper: пока бандл не перенесли из папки загрузок,
+    он живёт в /private/var/folders/.../AppTranslocation/ и обновить себя
+    физически не может.
+    """
+    bundle = macos_bundle()
+    return bool(bundle) and "/AppTranslocation/" in bundle.as_posix()
+
+
+def applications_dir() -> Path:
+    return Path.home() / "Applications"
+
+
+def install_to_applications() -> Path:
+    """Копирует бандл в личную папку «Программы» — оттуда он уже обновляется."""
+    bundle = macos_bundle()
+    if not bundle:
+        raise UpdateError("Не найден Clipper.app.")
+    target_dir = applications_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / bundle.name
+    backup = None
+    if target.exists():
+        backup = target.with_name(target.name + ".old")
+        shutil.rmtree(backup, ignore_errors=True)
+        target.rename(backup)
+    try:
+        # ditto сохраняет права и симлинки; cp -R их портит.
+        subprocess.run(["ditto", str(bundle), str(target)], check=True,
+                       capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        if backup:
+            backup.rename(target)
+        raise UpdateError(f"Не удалось скопировать программу: {exc}") from exc
+    subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(target)],
+                   check=False, capture_output=True)
+    if backup:
+        shutil.rmtree(backup, ignore_errors=True)
+    return target
+
+
+def launch(bundle: Path) -> None:
+    subprocess.Popen(["open", "-n", str(bundle)], close_fds=True)
+
+
 def can_self_update() -> bool:
     """Обновиться на месте можем и на Windows (один exe), и на macOS (бандл)."""
     if not is_frozen():
@@ -47,7 +94,7 @@ def can_self_update() -> bool:
     if sys.platform == "win32":
         return True
     if sys.platform == "darwin":
-        return macos_bundle() is not None
+        return macos_bundle() is not None and not is_translocated()
     return False
 
 
@@ -296,6 +343,11 @@ def restart() -> None:
 
 def source_hint() -> str:
     """Что делать, когда обновиться на месте нельзя."""
+    if is_translocated():
+        return ("Программа запущена из временной копии: macOS так поступает с "
+                "приложениями, скачанными из интернета, пока их не перенесли "
+                "к себе. Перенесите Clipper в папку «Программы» — тогда "
+                "обновление будет ставиться само.")
     if is_frozen():
         return f"Обновите программу вручную: {RELEASES_URL}"
     return ("Программа запущена из исходников — обновляйтесь через git pull. "
