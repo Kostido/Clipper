@@ -11,6 +11,7 @@ import os
 import platform
 import sys
 import tarfile
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -43,18 +44,19 @@ QJS_ASSET, BOTGUARD_ASSET_SUFFIX = _platform_assets()
 EXE = ".exe" if sys.platform == "win32" else ""
 
 
-def _api_headers() -> dict:
-    """В CI без токена GitHub быстро упирается в лимит запросов."""
+def _api_headers(url: str) -> dict:
+    """Токен шлём только на api.github.com: на редиректах загрузки и на
+    Codeberg он вызывает 401. Без него CI упирается в лимит запросов."""
     headers = {"User-Agent": "Clipper-fetch"}
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
+    if token and urllib.parse.urlparse(url).hostname == "api.github.com":
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
 def _get(url: str) -> bytes:
     # Codeberg токен GitHub не понимает, но лишний заголовок ему не мешает.
-    request = urllib.request.Request(url, headers=_api_headers())
+    request = urllib.request.Request(url, headers=_api_headers(url))
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read()
 
