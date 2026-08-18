@@ -179,7 +179,13 @@ def download(
         "merge_output_format": "mp4",
         "noplaylist": True,
         "restrictfilenames": True,
-        "windowsfilenames": True,
+        # Только на Windows: на macOS этот режим ломает пути — разделители
+        # заменяются на обратные слэши, а пустой путь превращается в корень,
+        # из-за чего временные файлы уезжали в «/» (там запись запрещена).
+        "windowsfilenames": sys.platform == "win32",
+        # Служебные файлы держим рядом с результатом: у собранного приложения
+        # рабочий каталог может оказаться корнем тома.
+        "paths": {"temp": str(out_dir)},
         "progress_hooks": [hook],
         "quiet": True,
         "no_warnings": True,

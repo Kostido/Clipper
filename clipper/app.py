@@ -1,6 +1,7 @@
 """Clipper — скачать видео по ссылке, обрезать кусок, отрендерить в H.264."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -1207,7 +1208,20 @@ def _apply_theme(app: QApplication) -> None:
     app.setStyleSheet(app.styleSheet() + QSS)
 
 
+def _ensure_writable_cwd() -> None:
+    """У .app рабочий каталог — корень тома, а туда писать нельзя."""
+    try:
+        current = Path.cwd()
+    except OSError:
+        current = None
+    if current is None or not os.access(current, os.W_OK):
+        fallback = storage.data_dir()
+        fallback.mkdir(parents=True, exist_ok=True)
+        os.chdir(fallback)
+
+
 def main() -> int:
+    _ensure_writable_cwd()
     if "--selftest" in sys.argv:
         index = sys.argv.index("--selftest")
         target = sys.argv[index + 1] if len(sys.argv) > index + 1 else "clipper-selftest.txt"
