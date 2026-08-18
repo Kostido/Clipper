@@ -713,6 +713,9 @@ class MainWindow(QMainWindow):
         browser = self.browser_combo.currentData()
         browser = None if browser == "Не использовать" else browser
 
+        # Ссылка введена — дальше работают клавиши плеера, а не текстовое поле.
+        self.url_edit.clearFocus()
+        self.timeline.setFocus()
         self.dl_progress.setValue(0)
         self.dl_progress.setVisible(True)
         self.download_btn.setText(tr("Отменить"))
@@ -849,6 +852,7 @@ class MainWindow(QMainWindow):
         self.timeline.set_range(0, duration_ms)
         self._update_range_label()
         self.setWindowTitle(f"{APP_NAME} — {path.name}")
+        self.timeline.setFocus()
         QTimer.singleShot(200, self.player.play)
         QTimer.singleShot(400, self.player.pause)
 

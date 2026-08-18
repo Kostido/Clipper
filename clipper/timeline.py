@@ -40,6 +40,9 @@ class TimelineWidget(QWidget):
         self._drag: str | None = None    # in | out | scrub
         self._hover: str | None = None
         self.setMouseTracking(True)
+        # Дорожке нужен фокус: пока он в поле ссылки, клавиши I, O и пробел
+        # принадлежат тексту, а не плееру.
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumHeight(TRACK_H + LABEL_H + 8)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setToolTip(
