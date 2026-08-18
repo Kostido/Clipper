@@ -1160,6 +1160,18 @@ def _selftest(report_path: str) -> int:
     plugin = root / "yt_dlp_plugins" / "extractor" / "yt_dlp_get_pot_rustypipe.py"
     lines.append(f"плагин PO-токенов: {'найден' if plugin.exists() else 'НЕ найден'} ({plugin})")
     try:
+        import certifi
+        ca = Path(certifi.where())
+        lines.append(f"сертификаты: {ca} (есть: {ca.exists()})")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"сертификаты: НЕ найдены — {exc}")
+    try:
+        release = updater.check()
+        lines.append(f"связь с GitHub: ок, последний релиз "
+                     f"{release.tag if release else 'не опубликован'}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"связь с GitHub: ОШИБКА — {str(exc)[:160]}")
+    try:
         import yt_dlp_ejs
         lines.append(f"yt_dlp_ejs: {yt_dlp_ejs.version}")
     except Exception as exc:  # noqa: BLE001

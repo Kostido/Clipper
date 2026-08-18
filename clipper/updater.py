@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import sys
 import urllib.error
 import urllib.request
@@ -75,19 +76,33 @@ def current_version() -> tuple:
 
 
 # ------------------------------------------------------------------ сеть ---
+def _ssl_context() -> ssl.SSLContext:
+    """В собранном приложении нет системного хранилища корневых сертификатов
+    (на macOS это особенно заметно), поэтому берём набор из certifi."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001 — остаёмся с системным набором
+        return ssl.create_default_context()
+
+
 def _open(url: str, timeout: int = TIMEOUT):
     request = urllib.request.Request(url, headers={
         "User-Agent": f"Clipper/{__version__}",
         "Accept": "application/vnd.github+json",
     })
+    context = _ssl_context()
     try:
-        return urllib.request.urlopen(request, timeout=timeout)
+        return urllib.request.urlopen(request, timeout=timeout, context=context)
     except urllib.error.HTTPError:
         raise
     except Exception:
         # Тот же случай, что и при скачивании видео: в системе прописан прокси
         # выключенного VPN — пробуем в обход.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=context),
+        )
         return opener.open(request, timeout=timeout)
 
 
@@ -101,7 +116,7 @@ def check() -> Optional[Release]:
             return None
         raise UpdateError(f"GitHub ответил {exc.code}: {exc.reason}") from exc
     except Exception as exc:  # noqa: BLE001
-        raise UpdateError(f"Не удалось связаться с GitHub: {exc}") from exc
+        raise UpdateError(_network_hint(exc)) from exc
 
     tag = data.get("tag_name") or ""
     wanted = asset_name()
@@ -206,3 +221,17 @@ def source_hint() -> str:
         "    git pull\n"
         f"Готовые сборки: {RELEASES_URL}"
     )
+
+
+def _network_hint(exc: Exception) -> str:
+    """Одна и та же ошибка сети означает разное — подсказываем, что именно."""
+    text = str(exc)
+    low = text.lower()
+    if "certificate" in low:
+        return ("Не удалось проверить сертификат GitHub. Обычно виноваты "
+                "неверные дата и время на компьютере или антивирус/корпоративный "
+                "прокси, подменяющий сертификаты." + chr(10) + chr(10) + text)
+    if "refused" in low or "10061" in low or "proxy" in low:
+        return ("Нет соединения с GitHub: похоже, включён прокси, а его "
+                "программа не запущена." + chr(10) + chr(10) + text)
+    return f"Не удалось связаться с GitHub: {text}"

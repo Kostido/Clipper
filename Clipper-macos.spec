@@ -29,7 +29,7 @@ a = Analysis(
     pathex=[str(project)],
     binaries=binaries,
     datas=datas,
-    hiddenimports=["yt_dlp", "curl_cffi", "qdarktheme", "yt_dlp_ejs"],
+    hiddenimports=["yt_dlp", "curl_cffi", "qdarktheme", "yt_dlp_ejs", "certifi"],
     hookspath=[],
     runtime_hooks=[],
     excludes=["tkinter", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets"],
@@ -67,8 +67,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "Clipper",
         "CFBundleDisplayName": "Clipper",
-        "CFBundleShortVersionString": "1.2.1",
-        "CFBundleVersion": "1.2.1",
+        "CFBundleShortVersionString": "1.2.2",
+        "CFBundleVersion": "1.2.2",
         "NSHighResolutionCapable": True,
         # Приложение только читает файлы и качает по сети — камера и микрофон не нужны.
         "LSMinimumSystemVersion": "11.0",
