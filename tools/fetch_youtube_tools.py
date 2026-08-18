@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import io
+import os
 import platform
 import sys
 import tarfile
@@ -42,8 +43,18 @@ QJS_ASSET, BOTGUARD_ASSET_SUFFIX = _platform_assets()
 EXE = ".exe" if sys.platform == "win32" else ""
 
 
+def _api_headers() -> dict:
+    """В CI без токена GitHub быстро упирается в лимит запросов."""
+    headers = {"User-Agent": "Clipper-fetch"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _get(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "Clipper-fetch"})
+    # Codeberg токен GitHub не понимает, но лишний заголовок ему не мешает.
+    request = urllib.request.Request(url, headers=_api_headers())
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read()
 

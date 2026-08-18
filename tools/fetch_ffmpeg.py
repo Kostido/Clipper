@@ -8,6 +8,7 @@ https://github.com/BtbN/FFmpeg-Builds (Windows) или https://evermeet.cx/ffmpe
 from __future__ import annotations
 
 import io
+import os
 import platform
 import shutil
 import sys
@@ -33,9 +34,18 @@ LINUX_TAR = (
 )
 
 
+def _api_headers() -> dict:
+    """В CI без токена GitHub быстро упирается в лимит запросов."""
+    headers = {"User-Agent": "Clipper-fetch"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _download(url: str) -> bytes:
     print(f"Качаю {url} …")
-    request = urllib.request.Request(url, headers={"User-Agent": "Clipper-fetch"})
+    request = urllib.request.Request(url, headers=_api_headers())
     with urllib.request.urlopen(request, timeout=180) as response:
         payload = response.read()
     print(f"  {len(payload) / 1024 / 1024:.1f} МБ")

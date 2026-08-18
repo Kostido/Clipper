@@ -15,6 +15,8 @@ permissions:
 env:
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: "1"
+  # Без токена анонимные запросы к api.github.com упираются в лимит.
+  GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
   windows:
