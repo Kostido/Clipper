@@ -173,23 +173,6 @@ def download(
         elif d.get("status") == "finished" and on_progress:
             on_progress(100.0, "обработка…")
 
-    class _Logger:
-        def debug(self, msg: str) -> None:
-            if on_log and not msg.startswith("[debug]"):
-                on_log(msg)
-
-        def info(self, msg: str) -> None:
-            if on_log:
-                on_log(msg)
-
-        def warning(self, msg: str) -> None:
-            if on_log:
-                on_log(msg)
-
-        def error(self, msg: str) -> None:
-            if on_log:
-                on_log(msg)
-
     opts: dict = {
         "outtmpl": str(out_dir / "%(title).80B [%(id)s].%(ext)s"),
         "format": QUALITY_FORMATS.get(quality, QUALITY_FORMATS["Максимальное"]),
@@ -198,7 +181,6 @@ def download(
         "restrictfilenames": True,
         "windowsfilenames": True,
         "progress_hooks": [hook],
-        "logger": _Logger(),
         "quiet": True,
         "no_warnings": True,
         "retries": 5,
@@ -238,7 +220,21 @@ def download(
     if not sources:
         sources.append(("", {}))
 
-    info, used_source = _extract_trying_cookies(opts, url, sources, auto, on_log)
+    # yt-dlp пишет причины отказа в лог (например «no key found»), а исключение
+    # приходит потом и уже без подробностей — запоминаем их по ходу.
+    notes: dict = {}
+
+    def watch(message: str) -> None:
+        low = message.lower()
+        if "could not be decrypted" in low or "no key found" in low:
+            notes["locked_keyring"] = True
+        if "find-generic-password failed" in low:
+            notes["locked_keyring"] = True
+        if on_log:
+            on_log(message)
+
+    opts["logger"] = _Logger(watch)
+    info, used_source = _extract_trying_cookies(opts, url, sources, auto, watch, notes)
 
     with YoutubeDL(opts) as ydl:
         path = Path(ydl.prepare_filename(info))
@@ -256,7 +252,31 @@ def download(
 
 
 
-def _extract_trying_cookies(opts: dict, url: str, sources: list, auto: bool, on_log):
+class _Logger:
+    """Приёмник сообщений yt-dlp."""
+
+    def __init__(self, sink) -> None:
+        self._sink = sink
+
+    def debug(self, msg: str) -> None:
+        if self._sink and not msg.startswith("[debug]"):
+            self._sink(msg)
+
+    def info(self, msg: str) -> None:
+        if self._sink:
+            self._sink(msg)
+
+    def warning(self, msg: str) -> None:
+        if self._sink:
+            self._sink(msg)
+
+    def error(self, msg: str) -> None:
+        if self._sink:
+            self._sink(msg)
+
+
+def _extract_trying_cookies(opts: dict, url: str, sources: list, auto: bool,
+                            on_log, notes: dict | None = None):
     """Перебираем источники cookies, пока сайт не отдаст видео."""
     # Итоговое сообщение строим по исходной причине («нужен логин»), а не по
     # технической ошибке последнего браузера — иначе она сбивает с толку.
@@ -278,7 +298,7 @@ def _extract_trying_cookies(opts: dict, url: str, sources: list, auto: bool, on_
             if _cookies_may_help(exc):
                 login_exc = exc
             if label:
-                tried.append(f"{label}: {_cookie_failure_reason(exc, label)}")
+                tried.append(f"{label}: {_cookie_failure_reason(exc, label, notes)}")
 
     if not auto:
         final = login_exc or last_exc
@@ -299,7 +319,7 @@ def _extract_trying_cookies(opts: dict, url: str, sources: list, auto: bool, on_
                 )
             return info, browser
         except Exception as exc:  # noqa: BLE001
-            reason = _cookie_failure_reason(exc, browser)
+            reason = _cookie_failure_reason(exc, browser, notes)
             tried.append(f"{browser}: {reason}")
             if on_log:
                 on_log(f"{browser}: {reason}")
@@ -314,13 +334,29 @@ def _extract_trying_cookies(opts: dict, url: str, sources: list, auto: bool, on_
 
 
 def _cookies_unreadable(exc: Exception) -> bool:
+    """Этот источник cookies не читается — не беда, берём следующий."""
+    if isinstance(exc, (PermissionError, FileNotFoundError)):
+        return True
     low = str(exc).lower()
     return any(hint in low for hint in (
-        "could not copy", "failed to decrypt", "could not find", "unsupported"))
+        "could not copy", "failed to decrypt", "could not find", "unsupported",
+        # macOS закрывает cookies Safari до выдачи полного доступа к диску,
+        # а Windows — базу запущенного браузера.
+        "operation not permitted", "errno 1", "permission denied", "access is denied"))
 
 
-def _cookie_failure_reason(exc: Exception, browser: str) -> str:
+def _cookie_failure_reason(exc: Exception, browser: str, notes: dict | None = None) -> str:
     low = str(exc).lower()
+    if notes and notes.pop("locked_keyring", False):
+        if sys.platform == "darwin":
+            return ("cookies зашифрованы, ключ в Связке ключей — разрешите доступ "
+                    "во всплывающем запросе macOS")
+        return "браузер шифрует cookies, нужен файл cookies.txt"
+    if "operation not permitted" in low or "errno 1" in low or "permission denied" in low:
+        if sys.platform == "darwin":
+            return ("нет доступа — дайте программе «Полный доступ к диску» "
+                    "в Системных настройках")
+        return "нет прав на чтение файла cookies"
     if "could not copy" in low:
         return f"браузер запущен, закройте {browser} и повторите"
     if "failed to decrypt" in low:
@@ -407,7 +443,8 @@ _MITIGATIONS = (
      _fix_plain_tls, lambda exc, url: _looks_like_bot_wall(exc) or (
          "403" in str(exc).lower() and "tiktok.com" in url.lower())),
     ("pot", "YouTube требует PO-токен — перехожу на web-клиент…",
-     _fix_pot, lambda exc, url: _is_forbidden(exc) and _prepare_pot()),
+     _fix_pot, lambda exc, url: (_is_forbidden(exc) or _is_bot_check(exc))
+     and _prepare_pot()),
     ("retry_fresh", "Ссылка протухла (403) — беру свежую и продолжаю…",
      _fix_check_formats, lambda exc, url: _is_forbidden(exc)),
     ("drm", "Формат под DRM — ищу пригодный…",
@@ -418,6 +455,13 @@ _MITIGATIONS = (
 def _is_forbidden(exc: Exception) -> bool:
     low = str(exc).lower()
     return "403" in low or "forbidden" in low
+
+
+def _is_bot_check(exc: Exception) -> bool:
+    """«Sign in to confirm you're not a bot» — это не про аккаунт, а про
+    PO-токен: у нас есть чем ответить, cookies тут не первое средство."""
+    low = str(exc).lower()
+    return "not a bot" in low or "sign in to confirm" in low
 
 
 def _pick_mitigation(exc: Exception, url: str, applied: set):
@@ -590,17 +634,29 @@ def _friendly_error(exc: Exception, url: str, tried: list | None = None) -> Exce
         ]
         if tried:
             lines += ["Что я попробовал:"] + [f"  • {t}" for t in tried] + [""]
-        lines += [
-            "Что сделать:",
-            "1. Войдите на сайт в браузере.",
-            "2. Полностью закройте этот браузер (запущенный держит cookies заблокированными)",
-            "   и повторите — в режиме «Авто» программа сама переберёт браузеры.",
-            "3. Если браузер шифрует cookies (Chrome 127+), экспортируйте их расширением",
-            "   вроде «Get cookies.txt LOCALLY» и укажите файл кнопкой «Файл cookies…».",
-            "",
-            "Исходная ошибка:",
-            text,
-        ]
+        if sys.platform == "darwin":
+            lines += [
+                "Что сделать на macOS:",
+                "1. Войдите на сайт в Safari.",
+                "2. Дайте программе «Полный доступ к диску»: Системные настройки →",
+                "   Конфиденциальность и безопасность → Полный доступ к диску → добавьте",
+                "   Clipper и перезапустите его. Пункт «Программа → Доступ к cookies…»",
+                "   открывает нужный раздел настроек.",
+                "3. Chrome и Opera держат ключ от cookies в Связке ключей: если macOS",
+                "   покажет запрос доступа — разрешите.",
+                "4. Всегда работающий путь: экспортируйте cookies.txt расширением вроде",
+                "   «Get cookies.txt LOCALLY» и укажите файл в Настройках.",
+            ]
+        else:
+            lines += [
+                "Что сделать:",
+                "1. Войдите на сайт в браузере.",
+                "2. Полностью закройте этот браузер (запущенный держит cookies заблокированными)",
+                "   и повторите — в режиме «Авто» программа сама переберёт браузеры.",
+                "3. Если браузер шифрует cookies (Chrome 127+), экспортируйте их расширением",
+                "   вроде «Get cookies.txt LOCALLY» и укажите файл в Настройках.",
+            ]
+        lines += ["", "Исходная ошибка:", text]
         return _mark(RuntimeError(chr(10).join(lines)))
     return exc
 

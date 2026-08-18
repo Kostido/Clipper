@@ -267,6 +267,9 @@ class MainWindow(QMainWindow):
     def _build_menu(self) -> None:
         menu = self.menuBar().addMenu("Программа")
         menu.addAction("Настройки…").triggered.connect(self.show_settings)
+        if sys.platform == "darwin":
+            # На macOS без этого разрешения не прочитать cookies Safari.
+            menu.addAction("Доступ к cookies…").triggered.connect(self.open_privacy_settings)
         menu.addSeparator()
         check = menu.addAction("Проверить обновления")
         check.triggered.connect(lambda: self.check_updates(silent=False))
@@ -1035,6 +1038,12 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Yes:
             updater.restart()
             self.close()
+
+    def open_privacy_settings(self) -> None:
+        """Открывает раздел «Полный доступ к диску» в настройках macOS."""
+        QDesktopServices.openUrl(QUrl(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"))
+        self.log("Добавьте Clipper в «Полный доступ к диску» и перезапустите программу.")
 
     def show_about(self) -> None:
         QMessageBox.information(self, APP_NAME, f"""{APP_NAME} {__version__}
