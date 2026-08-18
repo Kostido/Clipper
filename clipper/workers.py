@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from . import downloader, ffmpeg_tools
+from . import downloader, ffmpeg_tools, updater
 
 
 class DownloadWorker(QThread):
@@ -14,12 +14,15 @@ class DownloadWorker(QThread):
     finished_ok = Signal(object)      # downloader.DownloadResult
     failed = Signal(str)
 
-    def __init__(self, url: str, out_dir: Path, quality: str, browser: str | None = None) -> None:
+    def __init__(self, url: str, out_dir: Path, quality: str, browser: str | None = None,
+                 cookies_file: Path | None = None, proxy: str | None = None) -> None:
         super().__init__()
         self._url = url
         self._out_dir = out_dir
         self._quality = quality
         self._browser = browser
+        self._cookies_file = cookies_file
+        self._proxy = proxy
         self._cancel = False
 
     def cancel(self) -> None:
@@ -35,6 +38,8 @@ class DownloadWorker(QThread):
                 on_log=lambda m: self.log.emit(m),
                 should_cancel=lambda: self._cancel,
                 cookies_from_browser=self._browser,
+                cookies_file=self._cookies_file,
+                proxy=self._proxy,
             )
         except downloader.DownloadCancelled:
             self.failed.emit("Скачивание отменено.")
@@ -76,3 +81,71 @@ class ExportWorker(QThread):
             self.failed.emit(str(exc))
         else:
             self.finished_ok.emit(str(self._dst))
+
+
+class UpdateCheckWorker(QThread):
+    """Тихо спрашиваем GitHub про свежий релиз — интерфейс не ждёт сеть."""
+
+    result = Signal(object)      # updater.Release | None
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            self.result.emit(updater.check())
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class UpdateDownloadWorker(QThread):
+    progress = Signal(float)
+    finished_ok = Signal(object)   # Path со скачанным exe
+    failed = Signal(str)
+
+    def __init__(self, release) -> None:
+        super().__init__()
+        self._release = release
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        try:
+            staged = updater.download(
+                self._release,
+                on_progress=lambda p: self.progress.emit(p),
+                should_cancel=lambda: self._cancel,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        else:
+            self.finished_ok.emit(staged)
+
+
+class PreviewProxyWorker(QThread):
+    """Пережимает файл в H.264 для просмотра — оригинал остаётся как есть."""
+
+    progress = Signal(float)
+    finished_ok = Signal(object)   # Path готового превью
+    failed = Signal(str)
+
+    def __init__(self, src: Path, dst: Path) -> None:
+        super().__init__()
+        self._src = src
+        self._dst = dst
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        try:
+            path = ffmpeg_tools.make_preview_proxy(
+                self._src, self._dst,
+                on_progress=lambda p: self.progress.emit(p),
+                should_cancel=lambda: self._cancel,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        else:
+            self.finished_ok.emit(path)

@@ -1,3 +1,7 @@
 PySide6>=6.6
 yt-dlp>=2024.4.9
 imageio-ffmpeg>=0.4.9   # запасной источник ffmpeg, если его нет в системе
+curl_cffi>=0.10,<0.16   # имперсонация браузера — часть сайтов иначе отдаёт 403/401
+pyqtdarktheme-fork>=2.3   # современная тёмная тема интерфейса
+yt-dlp-ejs>=0.8                    # решатель JS-задач YouTube
+yt-dlp-get-pot-rustypipe>=0.2      # PO-токены YouTube (нужен bin/rustypipe-botguard.exe)

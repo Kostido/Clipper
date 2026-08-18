@@ -69,6 +69,8 @@ class MediaInfo:
     height: int
     fps: float
     has_audio: bool
+    vcodec: str = ""
+    acodec: str = ""
 
 
 def probe(path: Path) -> MediaInfo:
@@ -89,12 +91,16 @@ def probe(path: Path) -> MediaInfo:
             video = next((s for s in streams if s.get("codec_type") == "video"), {})
             audio = any(s.get("codec_type") == "audio" for s in streams)
             duration = float(data.get("format", {}).get("duration") or video.get("duration") or 0.0)
+            audio_stream = next(
+                (s for s in streams if s.get("codec_type") == "audio"), {})
             return MediaInfo(
                 duration=duration,
                 width=int(video.get("width") or 0),
                 height=int(video.get("height") or 0),
                 fps=_parse_fps(video.get("avg_frame_rate") or video.get("r_frame_rate")),
                 has_audio=audio,
+                vcodec=str(video.get("codec_name") or ""),
+                acodec=str(audio_stream.get("codec_name") or ""),
             )
     return _probe_via_ffmpeg(path)
 
@@ -258,3 +264,58 @@ def _parse_progress_time(line: str) -> Optional[float]:
 
 class ExportCancelled(RuntimeError):
     pass
+
+
+# Windows Media Foundation (на нём работает плеер Qt) знает H.264/AAC,
+# а AV1, VP9 и Opus у большинства пользователей не воспроизводит.
+PLAYABLE_VIDEO = {"h264", "avc1", "mpeg4", "hevc"}
+PLAYABLE_AUDIO = {"aac", "mp3", "mp4a", ""}
+
+
+def needs_preview_proxy(info: "MediaInfo | None") -> bool:
+    if not info:
+        return False
+    if info.vcodec and info.vcodec.lower() not in PLAYABLE_VIDEO:
+        return True
+    return bool(info.acodec) and info.acodec.lower() not in PLAYABLE_AUDIO
+
+
+def make_preview_proxy(
+    src: Path,
+    dst: Path,
+    on_progress: Optional[Callable[[float], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> Path:
+    """Лёгкая H.264-копия только для просмотра — оригинал для рендера не трогаем."""
+    ffmpeg = ffmpeg_path()
+    if not ffmpeg:
+        raise RuntimeError("Не найден ffmpeg — не из чего сделать превью.")
+    duration = probe(src).duration or 0.0
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(ffmpeg), "-y", "-hide_banner", "-i", str(src),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        # Больше 720p для предпросмотра не нужно, а кодируется заметно быстрее.
+        "-vf", "scale=-2:'min(720,ih)'",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
+        str(dst),
+    ]
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, encoding="utf-8", errors="replace", **_popen_kwargs()
+    )
+    for line in process.stdout or ():
+        if should_cancel and should_cancel():
+            process.kill()
+            raise RuntimeError("Подготовка превью отменена.")
+        if line.startswith("out_time_ms=") and duration and on_progress:
+            try:
+                done = int(line.split("=", 1)[1]) / 1_000_000
+            except ValueError:
+                continue
+            on_progress(min(100.0, done / duration * 100.0))
+    process.wait()
+    if process.returncode != 0 or not dst.exists():
+        raise RuntimeError("ffmpeg не смог подготовить превью.")
+    return dst

@@ -1,0 +1,119 @@
+name: build
+
+# Собирает Windows-exe, портативный архив и macOS-бандл.
+# Запуск вручную (workflow_dispatch) или по тегу v* — тогда файлы
+# прикрепляются к релизу, и автообновление в программе их подхватывает.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Зависимости
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: ffmpeg и инструменты YouTube
+        run: |
+          python tools/fetch_ffmpeg.py
+          python tools/fetch_youtube_tools.py
+
+      - name: Иконка
+        run: python tools/make_icon.py
+
+      - name: Сборка exe
+        run: pyinstaller --noconfirm Clipper.spec
+
+      - name: Портативный архив
+        run: python tools/make_portable.py
+
+      - name: Проверка сборки
+        run: |
+          .\dist\Clipper.exe --selftest selftest.txt
+          Start-Sleep -Seconds 20
+          Get-Content selftest.txt
+        shell: pwsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/Clipper.exe
+            dist/Clipper-portable-win64.zip
+
+  macos:
+    runs-on: macos-14          # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Зависимости
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: ffmpeg
+        run: |
+          brew install ffmpeg
+          mkdir -p bin
+          cp "$(command -v ffmpeg)" bin/ffmpeg
+          cp "$(command -v ffprobe)" bin/ffprobe
+
+      - name: Инструменты YouTube
+        run: python tools/fetch_youtube_tools.py
+
+      - name: Иконки
+        run: |
+          python tools/make_icon.py
+          python tools/make_icns.py
+
+      - name: Сборка Clipper.app
+        run: pyinstaller --noconfirm Clipper-macos.spec
+
+      - name: Ad-hoc подпись и архив
+        run: |
+          codesign --force --deep --sign - dist/Clipper.app || true
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent Clipper.app Clipper-macos.zip
+
+      - name: Проверка сборки
+        run: |
+          ./dist/Clipper.app/Contents/MacOS/Clipper --selftest selftest.txt || true
+          sleep 20
+          cat selftest.txt || echo "selftest не создан"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/Clipper-macos.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Прикрепить файлы к релизу
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/windows/Clipper.exe
+            artifacts/windows/Clipper-portable-win64.zip
+            artifacts/macos/Clipper-macos.zip

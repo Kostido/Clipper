@@ -8,3 +8,8 @@ dist/
 bin/ffmpeg.exe
 bin/ffprobe.exe
 downloads/
+bin/*
+!bin/.gitkeep
+*.dump
+assets/clipper.iconset/
+selftest.txt

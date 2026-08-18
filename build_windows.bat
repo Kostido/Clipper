@@ -16,7 +16,7 @@ python -m pip install -r requirements-build.txt || exit /b 1
 
 if not exist bin\ffmpeg.exe (
     echo [3/4] ffmpeg.exe не найден в bin\ — качаю...
-    python tools\fetch_ffmpeg.py || echo ВНИМАНИЕ: не удалось скачать ffmpeg, положите его в bin\ вручную.
+    python tools\fetch_ffmpeg.py || echo ВН�?МАН�?Е: не удалось скачать ffmpeg, положите его в bin\ вручную.
 ) else (
     echo [3/4] ffmpeg уже на месте.
 )

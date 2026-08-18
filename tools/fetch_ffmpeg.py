@@ -1,52 +1,96 @@
-"""Скачивает ffmpeg/ffprobe для Windows в папку bin/.
+"""Скачивает ffmpeg/ffprobe в папку bin/ под текущую систему.
 
 Запуск: python tools/fetch_ffmpeg.py
-Если сеть недоступна — положите ffmpeg.exe и ffprobe.exe в bin/ вручную
-(https://www.gyan.dev/ffmpeg/builds/ или https://github.com/BtbN/FFmpeg-Builds).
+Windows — сборки BtbN, macOS — сборки OSXExperts/evermeet.
+Если сеть недоступна, положите бинарники в bin/ вручную:
+https://github.com/BtbN/FFmpeg-Builds (Windows) или https://evermeet.cx/ffmpeg (macOS).
 """
 from __future__ import annotations
 
 import io
+import platform
 import shutil
 import sys
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
 
-URL = (
+BIN = Path(__file__).resolve().parent.parent / "bin"
+EXE = ".exe" if sys.platform == "win32" else ""
+WANTED = (f"ffmpeg{EXE}", f"ffprobe{EXE}")
+
+WINDOWS_ZIP = (
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
     "ffmpeg-master-latest-win64-gpl.zip"
 )
-WANTED = ("ffmpeg.exe", "ffprobe.exe")
+# У evermeet каждый бинарник лежит отдельным архивом.
+MAC_ZIPS = {
+    "ffmpeg": "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip",
+    "ffprobe": "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip",
+}
+LINUX_TAR = (
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+    "ffmpeg-master-latest-linux64-gpl.tar.xz"
+)
+
+
+def _download(url: str) -> bytes:
+    print(f"Качаю {url} …")
+    request = urllib.request.Request(url, headers={"User-Agent": "Clipper-fetch"})
+    with urllib.request.urlopen(request, timeout=180) as response:
+        payload = response.read()
+    print(f"  {len(payload) / 1024 / 1024:.1f} МБ")
+    return payload
+
+
+def _from_archive(payload: bytes, kind: str) -> None:
+    """Достаём только ffmpeg/ffprobe, остальное из архива не нужно."""
+    if kind == "zip":
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            members = [(m, Path(m).name) for m in archive.namelist()]
+            for member, name in members:
+                if name in WANTED:
+                    with archive.open(member) as src, open(BIN / name, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    print(f"  → bin/{name}")
+        return
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as archive:
+        for member in archive.getmembers():
+            name = Path(member.name).name
+            if member.isfile() and name in WANTED:
+                extracted = archive.extractfile(member)
+                (BIN / name).write_bytes(extracted.read())
+                print(f"  → bin/{name}")
 
 
 def main() -> int:
-    bin_dir = Path(__file__).resolve().parent.parent / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    if all((bin_dir / name).exists() for name in WANTED):
+    BIN.mkdir(parents=True, exist_ok=True)
+    if all((BIN / name).exists() for name in WANTED):
         print("ffmpeg уже в bin/ — пропускаю.")
         return 0
 
-    print(f"Качаю {URL} …")
-    with urllib.request.urlopen(URL, timeout=120) as response:
-        payload = response.read()
-    print(f"Скачано {len(payload) / 1024 / 1024:.1f} МБ, распаковываю…")
+    if sys.platform == "win32":
+        _from_archive(_download(WINDOWS_ZIP), "zip")
+    elif sys.platform == "darwin":
+        if platform.machine().lower() == "arm64":
+            print("Внимание: evermeet отдаёт сборки x86_64; на Apple Silicon они "
+                  "работают через Rosetta. Для нативной сборки поставьте "
+                  "ffmpeg через brew и уберите bin/ffmpeg.")
+        for url in MAC_ZIPS.values():
+            _from_archive(_download(url), "zip")
+    else:
+        _from_archive(_download(LINUX_TAR), "tar")
 
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        for member in archive.namelist():
-            name = Path(member).name
-            if name in WANTED:
-                with archive.open(member) as src, open(bin_dir / name, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                print(f"  → bin/{name}")
-
-    missing = [n for n in WANTED if not (bin_dir / n).exists()]
+    missing = [name for name in WANTED if not (BIN / name).exists()]
     if missing:
-        print("Не найдены в архиве: " + ", ".join(missing), file=sys.stderr)
+        print(f"Не удалось получить: {', '.join(missing)}")
         return 1
+    for name in WANTED:
+        (BIN / name).chmod(0o755)
     print("Готово.")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
