@@ -11,6 +11,11 @@ on:
 permissions:
   contents: write
 
+# Раннеры печатают в cp1252/cp437, а сообщения у нас на русском.
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -66,15 +71,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-build.txt
 
-      - name: ffmpeg
+      - name: ffmpeg и инструменты YouTube
         run: |
-          brew install ffmpeg
-          mkdir -p bin
-          cp "$(command -v ffmpeg)" bin/ffmpeg
-          cp "$(command -v ffprobe)" bin/ffprobe
-
-      - name: Инструменты YouTube
-        run: python tools/fetch_youtube_tools.py
+          python tools/fetch_ffmpeg.py
+          python tools/fetch_youtube_tools.py
 
       - name: Иконки
         run: |

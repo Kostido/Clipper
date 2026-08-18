@@ -24,11 +24,9 @@ WINDOWS_ZIP = (
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
     "ffmpeg-master-latest-win64-gpl.zip"
 )
-# У evermeet каждый бинарник лежит отдельным архивом.
-MAC_ZIPS = {
-    "ffmpeg": "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip",
-    "ffprobe": "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip",
-}
+# Для macOS берём статические сборки: бинарники из Homebrew тянут за собой
+# библиотеки из /opt/homebrew и на чужой машине не запускаются.
+MAC_RELEASE = "https://api.github.com/repos/eugeneware/ffmpeg-static/releases/latest"
 LINUX_TAR = (
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
     "ffmpeg-master-latest-linux64-gpl.tar.xz"
@@ -64,6 +62,23 @@ def _from_archive(payload: bytes, kind: str) -> None:
                 print(f"  → bin/{name}")
 
 
+def _fetch_macos() -> None:
+    """Статические сборки ffmpeg/ffprobe под нужную архитектуру."""
+    import gzip
+    import json
+
+    arch = "arm64" if platform.machine().lower() == "arm64" else "x64"
+    data = json.loads(_download(MAC_RELEASE).decode("utf-8"))
+    for tool in ("ffmpeg", "ffprobe"):
+        wanted = f"{tool}-darwin-{arch}.gz"
+        url = next((a["browser_download_url"] for a in data.get("assets", [])
+                    if a["name"] == wanted), None)
+        if not url:
+            raise SystemExit(f"В релизе ffmpeg-static нет {wanted}")
+        (BIN / tool).write_bytes(gzip.decompress(_download(url)))
+        print(f"  → bin/{tool}")
+
+
 def main() -> int:
     BIN.mkdir(parents=True, exist_ok=True)
     if all((BIN / name).exists() for name in WANTED):
@@ -73,12 +88,7 @@ def main() -> int:
     if sys.platform == "win32":
         _from_archive(_download(WINDOWS_ZIP), "zip")
     elif sys.platform == "darwin":
-        if platform.machine().lower() == "arm64":
-            print("Внимание: evermeet отдаёт сборки x86_64; на Apple Silicon они "
-                  "работают через Rosetta. Для нативной сборки поставьте "
-                  "ffmpeg через brew и уберите bin/ffmpeg.")
-        for url in MAC_ZIPS.values():
-            _from_archive(_download(url), "zip")
+        _fetch_macos()
     else:
         _from_archive(_download(LINUX_TAR), "tar")
 
