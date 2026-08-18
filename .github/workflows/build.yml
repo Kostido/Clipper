@@ -83,6 +83,9 @@ jobs:
           python tools/make_icon.py
           python tools/make_icns.py
 
+      - name: Тест самообновления
+        run: python tools/test_self_update.py
+
       - name: Сборка Clipper.app
         run: pyinstaller --noconfirm Clipper-macos.spec
 

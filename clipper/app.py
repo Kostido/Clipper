@@ -992,7 +992,7 @@ class MainWindow(QMainWindow):
 
 {notes}"""
         if not updater.can_self_update():
-            # Себя подменяем только на Windows; иначе ведём в релизы.
+            # Из исходников подменять нечего — ведём в релизы.
             QMessageBox.information(self, APP_NAME, head + """
 
 """ + updater.source_hint())

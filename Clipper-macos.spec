@@ -67,8 +67,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "Clipper",
         "CFBundleDisplayName": "Clipper",
-        "CFBundleShortVersionString": "1.2.3",
-        "CFBundleVersion": "1.2.3",
+        "CFBundleShortVersionString": "1.3.0",
+        "CFBundleVersion": "1.3.0",
         "NSHighResolutionCapable": True,
         # Приложение только читает файлы и качает по сети — камера и микрофон не нужны.
         "LSMinimumSystemVersion": "11.0",

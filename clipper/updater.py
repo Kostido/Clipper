@@ -4,8 +4,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import ssl
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -29,13 +32,23 @@ def asset_name() -> str:
     return "Clipper-linux"
 
 
-def can_self_update() -> bool:
-    """Себя на месте подменяем только на Windows: там это один exe.
+def macos_bundle() -> Optional[Path]:
+    """Путь к Clipper.app, если программа запущена из бандла."""
+    for parent in Path(sys.executable).parents:
+        if parent.suffix == ".app":
+            return parent
+    return None
 
-    На macOS программа — бандл Clipper.app из множества файлов, к тому же
-    подписанный; менять его на ходу нельзя, поэтому просто ведём в релизы.
-    """
-    return is_frozen() and sys.platform == "win32"
+
+def can_self_update() -> bool:
+    """Обновиться на месте можем и на Windows (один exe), и на macOS (бандл)."""
+    if not is_frozen():
+        return False
+    if sys.platform == "win32":
+        return True
+    if sys.platform == "darwin":
+        return macos_bundle() is not None
+    return False
 
 
 class UpdateError(RuntimeError):
@@ -145,7 +158,7 @@ def download(release: Release, on_progress: Callable[[float], None] | None = Non
         raise UpdateError(
             f"В релизе {release.tag} нет файла {asset_name()} — обновиться нечем."
         )
-    target = current_exe().with_name("Clipper.update.exe")
+    target = _staging_path()
     total = release.asset_size
     done = 0
     with _open(release.asset_url, timeout=60) as response, open(target, "wb") as out:
@@ -166,6 +179,14 @@ def download(release: Release, on_progress: Callable[[float], None] | None = Non
     return target
 
 
+def _staging_path() -> Path:
+    """Windows подменяет exe переименованием, поэтому файл кладём на тот же
+    том. На macOS распаковка идёт через временный каталог."""
+    if sys.platform == "win32":
+        return current_exe().with_name("Clipper.update.exe")
+    return Path(tempfile.gettempdir()) / "Clipper-update.zip"
+
+
 def _verify(path: Path, expected_size: int) -> None:
     size = path.stat().st_size
     if expected_size and size != expected_size:
@@ -175,12 +196,21 @@ def _verify(path: Path, expected_size: int) -> None:
         )
     with open(path, "rb") as handle:        # файл закрываем до удаления,
         header = handle.read(2)             # иначе Windows его не отдаёт
-    if header != b"MZ":                     # подпись windows-исполняемого файла
+    # MZ — исполняемый файл Windows, PK — zip с бандлом для macOS.
+    expected = b"MZ" if sys.platform == "win32" else b"PK"
+    if header != expected:
         path.unlink(missing_ok=True)
-        raise UpdateError("Скачан не exe-файл — обновление отменено.")
+        raise UpdateError("Скачан не тот файл — обновление отменено.")
 
 
 def apply_update(staged: Path) -> Path:
+    """Ставим скачанное на место работающей программы."""
+    if sys.platform == "darwin":
+        return _apply_update_macos(staged)
+    return _apply_update_windows(staged)
+
+
+def _apply_update_windows(staged: Path) -> Path:
     """Windows не даёт перезаписать запущенный exe, но даёт его переименовать."""
     exe = current_exe()
     backup = exe.with_name("Clipper.old.exe")
@@ -197,9 +227,55 @@ def apply_update(staged: Path) -> Path:
     return exe
 
 
+def _apply_update_macos(staged: Path) -> Path:
+    """Запущенный бандл переименовать можно — этим и пользуемся."""
+    bundle = macos_bundle()
+    if not bundle:
+        raise UpdateError("Не найден Clipper.app — обновите программу вручную.")
+    if not os.access(bundle.parent, os.W_OK):
+        raise UpdateError(
+            f"Нет прав на запись в {bundle.parent}. Перенесите Clipper.app "
+            "в свою папку «Программы» или обновите вручную."
+        )
+
+    work = Path(tempfile.mkdtemp(prefix="clipper-update-"))
+    try:
+        # ditto, а не zipfile: он сохраняет права на запуск и симлинки внутри
+        # бандла, без которых приложение просто не стартует.
+        subprocess.run(["ditto", "-x", "-k", str(staged), str(work)],
+                       check=True, capture_output=True)
+        new_app = next((p for p in work.glob("*.app")), None)
+        if not new_app or not (new_app / "Contents" / "MacOS").is_dir():
+            raise UpdateError("В архиве нет Clipper.app — обновление отменено.")
+
+        # Загруженное нами не помечено карантином, но проверить дёшево.
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(new_app)],
+                       check=False, capture_output=True)
+
+        backup = bundle.with_name(bundle.name + ".old")
+        shutil.rmtree(backup, ignore_errors=True)
+        bundle.rename(backup)
+        try:
+            shutil.move(str(new_app), str(bundle))
+        except OSError:
+            backup.rename(bundle)             # откат, если подмена не удалась
+            raise
+        return bundle
+    except subprocess.CalledProcessError as exc:
+        raise UpdateError(f"Не удалось распаковать обновление: {exc}") from exc
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        staged.unlink(missing_ok=True)
+
+
 def cleanup_old() -> None:
     """Прошлую версию удаляем при следующем запуске — раньше она ещё занята."""
     if not is_frozen():
+        return
+    bundle = macos_bundle()
+    if bundle:
+        shutil.rmtree(bundle.with_name(bundle.name + ".old"), ignore_errors=True)
+        (Path(tempfile.gettempdir()) / "Clipper-update.zip").unlink(missing_ok=True)
         return
     for name in ("Clipper.old.exe", "Clipper.update.exe"):
         try:
@@ -209,18 +285,21 @@ def cleanup_old() -> None:
 
 
 def restart() -> None:
-    import subprocess
-
+    bundle = macos_bundle()
+    if bundle:
+        # open запускает новый экземпляр уже обновлённого бандла.
+        subprocess.Popen(["open", "-n", str(bundle)], close_fds=True)
+        return
     subprocess.Popen([str(current_exe())], close_fds=True,
                      creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
 
 
 def source_hint() -> str:
-    return (
-        "Программа запущена из исходников — обновляйтесь через git:\n"
-        "    git pull\n"
-        f"Готовые сборки: {RELEASES_URL}"
-    )
+    """Что делать, когда обновиться на месте нельзя."""
+    if is_frozen():
+        return f"Обновите программу вручную: {RELEASES_URL}"
+    return ("Программа запущена из исходников — обновляйтесь через git pull. "
+            f"Готовые сборки: {RELEASES_URL}")
 
 
 def _network_hint(exc: Exception) -> str:
