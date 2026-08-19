@@ -6,9 +6,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QRect, QRectF, QSettings, QSize, QUrl, QTimer
+from PySide6.QtCore import QEvent, Qt, QRectF, QSettings, QSize, QUrl, QTimer
 from PySide6.QtGui import (QActionGroup, QColor, QDesktopServices, QFont,
                            QIcon, QPainter, QPainterPath, QPixmap)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -25,7 +26,12 @@ from .i18n import tr
 from .timecode import format_tc
 from .timeline import TimelineWidget, clip_length_text
 from .workers import (DownloadWorker, ExportWorker, PreviewProxyWorker,
-                      ThumbnailWorker, UpdateCheckWorker, UpdateDownloadWorker)
+                      UpdateCheckWorker, UpdateDownloadWorker)
+
+# Перемотка во время протяжки: ждём отработки предыдущей, но не дольше
+# SEEK_TIMEOUT — иначе на файле с медленным seek дорожка встанет совсем.
+SEEK_TIMEOUT = 0.35        # с
+SEEK_DONE_PX = 120         # мс: настолько близко — считаем, что доехали
 
 APP_NAME = "Clipper"
 PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast",
@@ -193,9 +199,9 @@ class MainWindow(QMainWindow):
         self._preview_was_playing = False
         self._pending_seek: int | None = None
         self._scrub_target: int | None = None
+        self._seek_inflight: int | None = None   # перемотка, которую плеер ещё не отработал
+        self._seek_sent = 0.0
         self.proxy_worker: PreviewProxyWorker | None = None
-        self.thumb_worker: ThumbnailWorker | None = None
-        self.thumbnails: list = []          # (секунда, файл) для быстрого превью
 
         self.setAcceptDrops(True)
         self._build_ui()
@@ -465,7 +471,7 @@ class MainWindow(QMainWindow):
         cache_row = QHBoxLayout()
         cache_row.addWidget(self._ghost(
             tr("Очистить служебные файлы"), self.clear_temp_cache,
-            tr("Превью и раскадровки — создаются заново при следующем открытии")))
+            tr("Превью — создаются заново при следующем открытии")))
         cache_row.addWidget(self._ghost(
             tr("Удалить скачанные видео…"), self.delete_downloads,
             tr("Файлы из папки загрузок — это ваши видео, они удаляются навсегда")))
@@ -500,12 +506,8 @@ class MainWindow(QMainWindow):
                 temp_size=storage.human_size(temp)))
 
     def clear_temp_cache(self) -> None:
-        """Превью и раскадровки: удаляются без вопросов — они восстановимы."""
+        """Превью: удаляются без вопросов — они создаются заново."""
         self._stop_proxy()
-        if self.thumb_worker and self.thumb_worker.isRunning():
-            self.thumb_worker.cancel()
-            self.thumb_worker.wait(2000)
-        self.thumbnails = []
         freed = 0
         for folder in storage.temp_dirs():
             freed += storage.folder_size(folder)
@@ -563,12 +565,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.video_widget, 1)
 
         # Живёт поверх области видео и исчезает, когда файл загружен.
-        # Кадр из раскадровки: показывается, пока тянут метку.
-        self.scrub_view = QLabel(self.video_widget)
-        self.scrub_view.setAlignment(Qt.AlignCenter)
-        self.scrub_view.setStyleSheet("background:#000; border:none;")
-        self.scrub_view.setVisible(False)
-
         self.drop_hint = QLabel(tr("Перетащите сюда видео или ссылку"), self.video_widget)
         self.drop_hint.setAlignment(Qt.AlignCenter)
         self.drop_hint.setStyleSheet(
@@ -761,8 +757,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue(
             "cookies_file", str(self.cookies_file) if self.cookies_file else "")
         self.settings.sync()          # ini пишется отложенно — сбрасываем сразу
-        for worker in (self.download_worker, self.export_worker,
-                       self.proxy_worker, self.thumb_worker):
+        for worker in (self.download_worker, self.export_worker, self.proxy_worker):
             if worker and worker.isRunning():
                 worker.cancel()
                 worker.wait(3000)
@@ -914,11 +909,7 @@ class MainWindow(QMainWindow):
         self._place_drop_hint()
 
     def _place_drop_hint(self) -> None:
-        area = (0, 0, self.video_widget.width(), self.video_widget.height())
-        self.drop_hint.setGeometry(*area)
-        if self.scrub_view.geometry() != QRect(*area):
-            self.scrub_view.setGeometry(*area)
-            self._rescale_scrub_frame()
+        self.drop_hint.setGeometry(0, 0, self.video_widget.width(), self.video_widget.height())
 
     def load_media(self, path: Path) -> None:
         self.source = path
@@ -935,7 +926,6 @@ class MainWindow(QMainWindow):
                 f"{self.info.fps:.2f} к/с, {format_tc(self.info.duration)}"
             )
         self._stop_proxy()
-        self._start_thumbnails(path)
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         if ffmpeg_tools.needs_preview_proxy(self.info):
             self._start_preview_proxy(path)
@@ -987,60 +977,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr("Не удалось подготовить превью"))
 
 
-    # ------------------------------------------------------- раскадровка ----
-    def _start_thumbnails(self, path: Path) -> None:
-        """Нарезаем кадры в фоне: перемотка плеера слишком медленная."""
-        if self.thumb_worker and self.thumb_worker.isRunning():
-            self.thumb_worker.cancel()
-            self.thumb_worker.wait(1500)
-        self.thumbnails = []
-        target = Path(tempfile.gettempdir()) / "clipper_thumbs" / path.stem
-        worker = ThumbnailWorker(path, target)
-        worker.ready.connect(self._on_thumbnails_ready)
-        self.thumb_worker = worker
-        worker.start()
-
-    def _on_thumbnails_ready(self, frames: list) -> None:
-        """Приходит дважды: сперва редкая сетка, потом плотная."""
-        if not frames:
-            self.log(tr("Раскадровка не получилась — предпросмотр будет медленнее."))
-            return
-        if len(frames) < len(self.thumbnails):
-            return
-        self.thumbnails = frames
-        self.log(tr("Предпросмотр: {count} кадров.").format(count=len(frames)))
-
-    def _thumbnail_at(self, ms: int) -> Path | None:
-        if not self.thumbnails:
-            return None
-        seconds = ms / 1000
-        # Кадры идут с равным шагом — берём ближайший по времени.
-        index = min(range(len(self.thumbnails)),
-                    key=lambda i: abs(self.thumbnails[i][0] - seconds))
-        return self.thumbnails[index][1]
-
-    def _show_scrub_frame(self, ms: int) -> bool:
-        path = self._thumbnail_at(ms)
-        if not path:
-            return False
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
-            return False
-        # Размер могли поменять между кадрами — держим оверлей ровно по видео.
-        self._place_drop_hint()
-        self._scrub_pixmap = pixmap
-        self._rescale_scrub_frame()
-        self.scrub_view.setVisible(True)
-        self.scrub_view.raise_()
-        return True
-
-    def _rescale_scrub_frame(self) -> None:
-        pixmap = getattr(self, "_scrub_pixmap", None)
-        if pixmap is None or pixmap.isNull() or self.scrub_view.width() <= 0:
-            return
-        self.scrub_view.setPixmap(pixmap.scaled(
-            self.scrub_view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-
     def toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
@@ -1058,6 +994,9 @@ class MainWindow(QMainWindow):
         self.player.setPosition(int(max(0.0, seconds) * 1000))
 
     def _on_position_changed(self, ms: int) -> None:
+        if (self._seek_inflight is not None
+                and abs(ms - self._seek_inflight) <= SEEK_DONE_PX):
+            self._seek_inflight = None      # доехали — можно слать следующую
         if not self.timeline.is_dragging():
             self.timeline.set_position(ms)
         self.time_label.setText(f"{format_tc(ms / 1000)} / {self._duration_text()}")
@@ -1082,32 +1021,19 @@ class MainWindow(QMainWindow):
 
 
     def _on_timeline_seek(self, ms: int) -> None:
-        """Тянут позицию по дорожке: показываем кадр, плеер трогаем в конце.
-
-        Перемотка плеера занимает сотни миллисекунд и за мышью не поспевает,
-        поэтому во время перетаскивания рисуем готовый кадр раскадровки.
-        """
+        """Тянут позицию по дорожке — перематываем само видео."""
         self._scrub_target = ms
-        if self._show_scrub_frame(ms):
-            return
-        # Раскадровки ещё нет: перематываем сам плеер, но не чаще таймера —
-        # seek на каждое движение мыши он не переваривает и картинка встаёт.
-        self._pending_seek = ms
-        if not self._seek_timer.isActive():
-            self._apply_pending_seek()
-            self._seek_timer.start()
+        self._queue_seek(ms)
 
     def _on_scrub_finished(self) -> None:
-        """Отпустили дорожку — доводим плеер до выбранной позиции."""
-        self.scrub_view.setVisible(False)
-        self._seek_timer.stop()
-        self._pending_seek = None
+        """Отпустили дорожку — доводим плеер точно до выбранной позиции."""
+        self._stop_seeks()
         if self._scrub_target is not None:
             self.player.setPosition(self._scrub_target)
             self._scrub_target = None
 
     def _on_preview_scrub(self, ms: int) -> None:
-        """Метку тянут — показываем кадр под ней, не теряя позицию плеера."""
+        """Метку тянут — показываем кадр под ней, запомнив позицию плеера."""
         if self._preview_return is None:
             self._preview_return = self.player.position()
             self._preview_was_playing = (
@@ -1115,27 +1041,43 @@ class MainWindow(QMainWindow):
             )
             if self._preview_was_playing:
                 self.player.pause()
-        if self._show_scrub_frame(ms):
-            # Готовый кадр рисуется мгновенно, плеер при этом не трогаем:
-            # его перемотка не успевает за мышью и картинка отстаёт.
-            return
+        self._queue_seek(ms)
+
+    def _queue_seek(self, ms: int) -> None:
+        """Перемотка не чаще таймера: seek на каждое движение мыши плеер не тянет.
+
+        Первый кадр показываем сразу, дальше копим последнее значение —
+        промежуточные позиции всё равно не успели бы отрисоваться.
+        """
         self._pending_seek = ms
-        if not self._seek_timer.isActive():
-            self._apply_pending_seek()      # первый кадр — сразу, без задержки
-            self._seek_timer.start()
+        if self._seek_timer.isActive():
+            return
+        self._apply_pending_seek()
+        self._seek_timer.start()
 
     def _apply_pending_seek(self) -> None:
         if self._pending_seek is None:
             self._seek_timer.stop()
             return
+        # Пока плеер не отработал прошлую перемотку, новую не шлём: на тяжёлом
+        # файле seek занимает сотни миллисекунд, и очередь запросов только
+        # растёт — картинка отстаёт тем сильнее, чем дольше тянут.
+        if (self._seek_inflight is not None
+                and time.monotonic() - self._seek_sent < SEEK_TIMEOUT):
+            return
+        self._seek_inflight = self._pending_seek
+        self._seek_sent = time.monotonic()
         self.player.setPosition(self._pending_seek)
         self._pending_seek = None
 
-    def _on_preview_finished(self) -> None:
-        """Метку отпустили — возвращаемся туда, где стоит плеер."""
-        self.scrub_view.setVisible(False)
+    def _stop_seeks(self) -> None:
         self._seek_timer.stop()
         self._pending_seek = None
+        self._seek_inflight = None
+
+    def _on_preview_finished(self) -> None:
+        """Метку отпустили — возвращаемся туда, где стоит плеер."""
+        self._stop_seeks()
         if self._preview_return is None:
             return
         self.player.setPosition(self._preview_return)

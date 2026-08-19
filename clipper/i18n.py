@@ -68,8 +68,8 @@ EN = {
     "Папка загрузок, cookies, прокси": "Download folder, cookies, proxy",
     "ХРАНЕНИЕ": "STORAGE",
     "Очистить служебные файлы": "Clear temporary files",
-    "Превью и раскадровки — создаются заново при следующем открытии":
-        "Previews and frame strips — rebuilt next time you open a video",
+    "Превью — создаются заново при следующем открытии":
+        "Previews — rebuilt next time you open a video",
     "Удалить скачанные видео…": "Delete downloaded videos…",
     "Файлы из папки загрузок — это ваши видео, они удаляются навсегда":
         "Files in the download folder are your videos; deletion is permanent",
@@ -175,7 +175,7 @@ EN = {
     "Перетащено файлов: {count} — открываю первый.":
         "{count} files dropped — opening the first one.",
 
-    # --- превью и раскадровка ---
+    # --- превью ---
     "Кодек {codecs} встроенный плеер не воспроизводит — готовлю превью…":
         "The built-in player cannot play {codecs} — preparing a preview…",
     "Готовлю превью для просмотра…": "Preparing a preview…",
@@ -187,9 +187,6 @@ EN = {
         "Preview ready — the original is kept for rendering",
     "Превью не получилось: {message}": "Preview failed: {message}",
     "Не удалось подготовить превью": "Could not prepare the preview",
-    "Предпросмотр: {count} кадров.": "Preview: {count} frames.",
-    "Раскадровка не получилась — предпросмотр будет медленнее.":
-        "Could not build the frame strip — preview will be slower.",
     "Проигрыватель: {message}": "Player: {message}",
     "Файл: {name} — {width}x{height}, {fps:.2f} к/с, {duration}":
         "File: {name} — {width}x{height}, {fps:.2f} fps, {duration}",

@@ -151,36 +151,3 @@ class PreviewProxyWorker(QThread):
             self.finished_ok.emit(path)
 
 
-class ThumbnailWorker(QThread):
-    """Нарезает кадры для предпросмотра, пока пользователь смотрит видео."""
-
-    ready = Signal(object)         # список (секунда, путь)
-
-    def __init__(self, src: Path, out_dir: Path) -> None:
-        super().__init__()
-        self._src = src
-        self._out_dir = out_dir
-        self._cancel = False
-
-    def cancel(self) -> None:
-        self._cancel = True
-
-    # Сначала редкая сетка — с ней предпросмотр работает почти сразу,
-    # потом плотная. Первый запуск ffmpeg на холодной машине долгий, и ждать
-    # сотню кадров ради первого движения мышью незачем. Финальная стадия
-    # плотная: на длинном ролике редкая сетка даёт заметные ступени вместо
-    # плавной перемотки.
-    STAGES = (8, 40, 240)
-
-    def run(self) -> None:
-        for count in self.STAGES:
-            if self._cancel:
-                return
-            try:
-                frames = ffmpeg_tools.extract_thumbnails(
-                    self._src, self._out_dir / str(count), count=count,
-                    should_cancel=lambda: self._cancel)
-            except Exception:  # noqa: BLE001 — без раскадровки работаем как раньше
-                frames = []
-            if frames and not self._cancel:
-                self.ready.emit(frames)

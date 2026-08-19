@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -341,58 +339,3 @@ def make_preview_proxy(
     return dst
 
 
-def _thumb_workers() -> int:
-    """Кадры режутся независимыми вызовами ffmpeg — грузим все ядра, но не машину целиком."""
-    return max(2, min(8, (os.cpu_count() or 4)))
-
-
-def extract_thumbnails(
-    src: Path,
-    out_dir: Path,
-    count: int = 120,
-    height: int = 180,
-    should_cancel: Optional[Callable[[], bool]] = None,
-) -> list:
-    """Раскадровка для отзывчивого предпросмотра.
-
-    Плеер перематывается медленно, поэтому пока метку тянут, показываем
-    заранее вырезанные кадры. Каждый кадр берём отдельным быстрым переходом
-    (-ss до -i) и делаем это в несколько потоков: декодировать весь файл
-    ради сотни картинок слишком долго — на трёхминутном ролике это минута.
-    """
-    ffmpeg = ffmpeg_path()
-    if not ffmpeg:
-        return []
-    duration = probe(src).duration
-    if duration <= 0:
-        return []
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob("*.jpg"):
-        old.unlink(missing_ok=True)
-
-    count = max(2, min(count, int(duration * 2)))
-    step = duration / count
-    jobs = [(index, index * step) for index in range(count)]
-
-    def grab(job: tuple) -> tuple:
-        index, moment = job
-        if should_cancel and should_cancel():
-            return moment, None
-        target = out_dir / f"{index:05d}.jpg"
-        cmd = [
-            str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
-            "-ss", f"{moment:.3f}", "-i", str(src), "-frames:v", "1",
-            "-vf", f"scale=-2:{height}", "-q:v", "6", str(target),
-        ]
-        result = subprocess.run(cmd, capture_output=True, **_popen_kwargs())
-        if result.returncode != 0 or not target.exists():
-            return moment, None
-        return moment, target
-
-    with ThreadPoolExecutor(max_workers=_thumb_workers()) as pool:
-        frames = list(pool.map(grab, jobs))
-
-    if should_cancel and should_cancel():
-        return []
-    return [(moment, path) for moment, path in frames if path]

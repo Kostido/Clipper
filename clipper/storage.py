@@ -57,11 +57,11 @@ def default_download_dir() -> Path:
 
 
 def temp_dirs() -> list:
-    """Служебные каталоги: превью для неиграбельных кодеков и раскадровки."""
+    """Служебные каталоги: перекодированные превью для неиграбельных кодеков."""
     import tempfile
 
     base = Path(tempfile.gettempdir())
-    return [base / "clipper_preview", base / "clipper_thumbs"]
+    return [base / "clipper_preview", base / "clipper_thumbs"]  # второй — от старых версий
 
 
 def folder_size(path: Path) -> int:
