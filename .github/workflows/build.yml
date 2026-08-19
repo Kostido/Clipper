@@ -54,6 +54,8 @@ jobs:
         run: |
           python tools/test_cache.py
           python tools/test_i18n.py
+          python tools/test_download_errors.py
+          python tools/test_export_dir.py
 
       - name: Сборка exe
         run: pyinstaller --noconfirm Clipper.spec

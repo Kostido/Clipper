@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import re
 import sys
@@ -49,6 +50,10 @@ def site_domain(url: str) -> str:
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     parts = [p for p in host.split(".") if p]
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _is_youtube(url: str) -> bool:
+    return site_domain(url) in ("youtube.com", "youtu.be")
 
 
 def cookie_cache_path(url: str) -> Path:
@@ -439,6 +444,63 @@ def _fix_check_formats(opts: dict, stack) -> None:  # noqa: ARG001
     opts["check_formats"] = "selected"
 
 
+@functools.lru_cache(maxsize=1)
+def _impersonate_targets() -> tuple:
+    """Какие браузеры умеет подделывать установленный curl_cffi.
+
+    Набор зависит от его версии, поэтому спрашиваем сам yt-dlp, а не гадаем:
+    указать недоступную цель — сразу ошибка ещё до запроса.
+    """
+    try:
+        from yt_dlp import YoutubeDL
+
+        with YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            return tuple(target for target, _ in ydl._get_available_impersonate_targets())
+    except Exception:  # noqa: BLE001 — старая версия yt-dlp или нет curl_cffi
+        return ()
+
+
+def _impersonate_like(*prefixes: str):
+    """Первая доступная цель, чьё имя начинается с одного из префиксов.
+
+    Десктопные цели идут первыми: мобильному Safari сайт отдаёт мобильную
+    вёрстку и урезанный набор форматов.
+    """
+    def rank(target) -> tuple:
+        name = str(target)
+        desktop = 0 if (":macos" in name or ":windows" in name) else 1
+        version = re.search(r"-(\d+(?:\.\d+)?)", name)
+        return desktop, -float(version.group(1)) if version else 0.0
+
+    targets = sorted(_impersonate_targets(), key=rank)
+    for prefix in prefixes:
+        for target in targets:
+            if str(target).startswith(prefix):
+                return target
+    return None
+
+
+def _impersonate_fix(*prefixes: str):
+    """Мера: повторить запрос, представившись другим браузером.
+
+    Сайт может банить не адрес, а конкретный TLS-отпечаток — тогда достаточно
+    сменить браузер, за который себя выдаёт загрузчик.
+    """
+    def apply(opts: dict, stack) -> None:  # noqa: ARG001
+        target = _impersonate_like(*prefixes)
+        if target is not None:
+            opts["impersonate"] = target
+
+    return apply
+
+
+def _impersonate_available(*prefixes: str):
+    def when(exc: Exception, url: str) -> bool:  # noqa: ARG001
+        return _is_forbidden(exc) and _impersonate_like(*prefixes) is not None
+
+    return when
+
+
 # Порядок важен: сначала дешёвые и безопасные меры, потом тяжёлые.
 _MITIGATIONS = (
     ("proxy", "Системный прокси не отвечает — пробую напрямую…",
@@ -449,8 +511,14 @@ _MITIGATIONS = (
      _fix_plain_tls, lambda exc, url: _looks_like_bot_wall(exc) or (
          "403" in str(exc).lower() and "tiktok.com" in url.lower())),
     ("pot", "YouTube требует PO-токен — перехожу на web-клиент…",
-     _fix_pot, lambda exc, url: (_is_forbidden(exc) or _is_bot_check(exc))
-     and _prepare_pot()),
+     _fix_pot, lambda exc, url: _is_youtube(url)
+     and (_is_forbidden(exc) or _is_bot_check(exc)) and _prepare_pot()),
+    ("as_safari", "Сайт отдал 403 — пробую представиться Safari…",
+     _impersonate_fix("safari"), _impersonate_available("safari")),
+    ("as_firefox", "Всё ещё 403 — пробую представиться Firefox…",
+     _impersonate_fix("firefox"), _impersonate_available("firefox")),
+    ("as_edge", "Всё ещё 403 — пробую представиться Edge…",
+     _impersonate_fix("edge", "chrome-1"), _impersonate_available("edge", "chrome-1")),
     ("retry_fresh", "Ссылка протухла (403) — беру свежую и продолжаю…",
      _fix_check_formats, lambda exc, url: _is_forbidden(exc)),
     ("drm", "Формат под DRM — ищу пригодный…",
@@ -526,13 +594,32 @@ def _extract(opts: dict, url: str, save_cookies_to: Path | None = None) -> dict:
 _TIMEOUT_HINTS = ("timed out", "timeout", "connection reset", "handshake operation")
 
 # Классика: в Windows остался включён прокси от выключенного VPN-клиента.
+# Слова вроде «proxy» тут быть не должно: сайты сами пишут про VPN/proxy в
+# тексте отказа, и такой ответ ошибочно принимался за обрыв на прокси.
 _PROXY_HINTS = ("failed to connect to 127.0.0.1", "failed to connect to localhost",
-                "proxy", "curl: (7)", "10061", "actively refused", "connection refused")
+                "proxyerror", "connect tunnel failed", "unable to connect to proxy",
+                "cannot connect to proxy", "curl: (7)", "10061",
+                "actively refused", "connection refused")
+
+# Сайт ответил и отказал — значит соединение было, при чём тут прокси.
+_SITE_ANSWERED_HINTS = ("http error 4", "http error 5", "got http error")
 
 
 def _looks_like_dead_proxy(exc: Exception) -> bool:
     low = str(exc).lower()
+    if any(hint in low for hint in _SITE_ANSWERED_HINTS):
+        return False
     return any(hint in low for hint in _PROXY_HINTS)
+
+
+# Vimeo и другие режут адреса VPN и дата-центров, прямо об этом и пишут.
+_IP_BLOCK_HINTS = ("your ip may be blocked", "data center ip",
+                   "ip address is blocked", "access denied from your")
+
+
+def _looks_like_blocked_ip(exc: Exception) -> bool:
+    low = str(exc).lower()
+    return any(hint in low for hint in _IP_BLOCK_HINTS)
 
 
 # Признаки того, что до нас даже не доехала настоящая страница.
@@ -605,14 +692,14 @@ def _friendly_error(exc: Exception, url: str, tried: list | None = None) -> Exce
             text,
         ]
         return _mark(RuntimeError(chr(10).join(lines)))
-    if ("403" in low or "forbidden" in low) and not pot_binary():
+    if _is_youtube(url) and ("403" in low or "forbidden" in low) and not pot_binary():
         return _mark(RuntimeError(
             "YouTube требует PO-токен, а генератор токенов не найден." + chr(10) + chr(10) +
             f"Положите {POT_BINARY}.exe в папку bin рядом с программой "
             "или выполните: python tools/fetch_pot.py" + chr(10) + chr(10) +
             "Исходная ошибка:" + chr(10) + text
         ))
-    if ("403" in low or "forbidden" in low) and not js_runtimes():
+    if _is_youtube(url) and ("403" in low or "forbidden" in low) and not js_runtimes():
         return _mark(RuntimeError(
             "YouTube отдал 403: не найден JavaScript-рантайм, без него подписи "
             "ссылок не считаются." + chr(10) + chr(10) +
@@ -625,6 +712,29 @@ def _friendly_error(exc: Exception, url: str, tried: list | None = None) -> Exce
             "Видео защищено DRM — скачать его нельзя ни этой программой, "
             "ни любой другой: поток зашифрован на стороне сайта."
         ))
+    if _looks_like_blocked_ip(exc):
+        lines = [
+            "Сайт ответил 403: заблокирован адрес, с которого идёт скачивание.",
+            "",
+            "Vimeo и другие сайты режут адреса VPN и дата-центров целыми диапазонами —"
+            " видео при этом открывается в браузере, а загрузчику приходит отказ.",
+            "",
+        ]
+        if tried:
+            lines += ["Что я попробовал:"] + [f"  • {t}" for t in tried] + [""]
+        lines += [
+            "Что помогает:",
+            "1. Переключить VPN на другую страну или другой сервер — обычно хватает",
+            "   этого: забанен конкретный диапазон, а не VPN вообще.",
+            "2. Выключить VPN, если видео доступно и без него.",
+            "3. Войти на сайт в браузере и передать программе cookies: полностью",
+            "   закройте браузер и повторите, либо укажите файл cookies.txt",
+            "   в настройках — с аккаунтом сайт отдаёт видео и с VPN.",
+            "",
+            "Исходная ошибка:",
+            text,
+        ]
+        return _mark(RuntimeError(chr(10).join(lines)))
     if _looks_like_dead_proxy(exc):
         return _mark(RuntimeError(
             "Нет соединения через системный прокси, и напрямую сайт тоже не открылся."
