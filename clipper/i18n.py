@@ -167,6 +167,7 @@ EN = {
     "Видео (*.mp4 *.mkv *.mov *.webm *.avi *.m4v *.flv);;Все файлы (*.*)":
         "Video (*.mp4 *.mkv *.mov *.webm *.avi *.m4v *.flv);;All files (*.*)",
     "Папка для загрузок": "Download folder",
+    "Сохранить фрагмент": "Save clip",
     "Файл cookies (Netscape cookies.txt)": "Cookie file (Netscape cookies.txt)",
     "cookies.txt (*.txt);;Все файлы (*)": "cookies.txt (*.txt);;All files (*)",
     "Файл cookies отключён.": "Cookie file disabled.",

@@ -189,6 +189,7 @@ class MainWindow(QMainWindow):
             self.settings = QSettings("Clipper", "Clipper")
         self.source: Path | None = None
         self.info: ffmpeg_tools.MediaInfo | None = None
+        self.export_dir: Path | None = None   # куда сохраняли фрагмент в прошлый раз
         self.download_worker: DownloadWorker | None = None
         self.export_worker: ExportWorker | None = None
         self.update_worker: UpdateCheckWorker | None = None
@@ -745,6 +746,11 @@ class MainWindow(QMainWindow):
         saved_cookies = self.settings.value("cookies_file", type=str)
         if saved_cookies and Path(saved_cookies).exists():
             self._set_cookies_file(Path(saved_cookies))
+        # Папку последнего экспорта держим отдельно от папки загрузок: люди
+        # складывают готовые куски не туда, куда качают исходники.
+        saved_export = self.settings.value("export_dir", type=str)
+        if saved_export and Path(saved_export).is_dir():
+            self.export_dir = Path(saved_export)
 
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt API
         self.settings.setValue("download_dir", self.dir_edit.text())
@@ -1295,6 +1301,20 @@ class MainWindow(QMainWindow):
         for widget in (self.bitrate_combo, self.preset_combo, self.res_combo, self.fps_combo):
             widget.setEnabled(not checked)
 
+    def _suggested_export_path(self) -> Path:
+        """Куда предложить сохранить: где сохраняли прошлый раз, иначе к загрузкам."""
+        folder = self.export_dir if self.export_dir and self.export_dir.is_dir() else None
+        if folder is None:
+            folder = Path(self.dir_edit.text().strip() or ".")
+        name = f"{self.source.stem}_clip.mp4" if self.source else "clip.mp4"
+        return folder / name
+
+    def _remember_export_dir(self, folder: Path) -> None:
+        """Пишем сразу, а не в closeEvent: иначе выбор потеряется при сбое."""
+        self.export_dir = folder
+        self.settings.setValue("export_dir", str(folder))
+        self.settings.sync()
+
     def start_export(self) -> None:
         if self.export_worker and self.export_worker.isRunning():
             self.export_worker.cancel()
@@ -1310,15 +1330,16 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, str(ffmpeg_tools.FFmpegMissingError()))
             return
 
-        suggested = Path(self.dir_edit.text().strip() or ".") / f"{self.source.stem}_clip.mp4"
         dst, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить фрагмент", str(suggested), "MP4 (H.264) (*.mp4)"
+            self, tr("Сохранить фрагмент"), str(self._suggested_export_path()),
+            "MP4 (H.264) (*.mp4)"
         )
         if not dst:
             return
         dst_path = Path(dst)
         if dst_path.suffix.lower() != ".mp4":
             dst_path = dst_path.with_suffix(".mp4")
+        self._remember_export_dir(dst_path.parent)
         if dst_path.resolve() == self.source.resolve():
             QMessageBox.warning(self, APP_NAME, tr("Нельзя записать результат поверх исходного файла."))
             return
