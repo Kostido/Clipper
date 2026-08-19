@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -191,6 +192,7 @@ class MainWindow(QMainWindow):
         self._preview_return: int | None = None
         self._preview_was_playing = False
         self._pending_seek: int | None = None
+        self._scrub_target: int | None = None
         self.proxy_worker: PreviewProxyWorker | None = None
         self.thumb_worker: ThumbnailWorker | None = None
         self.thumbnails: list = []          # (секунда, файл) для быстрого превью
@@ -448,6 +450,21 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._label(
             tr("Настройки сохраняются автоматически и применяются к следующей загрузке.")))
 
+        outer.addWidget(self._label(tr("ХРАНЕНИЕ"), "section"))
+        self.cache_label = self._label("")
+        self.cache_label.setWordWrap(True)
+        outer.addWidget(self.cache_label)
+
+        cache_row = QHBoxLayout()
+        cache_row.addWidget(self._ghost(
+            tr("Очистить служебные файлы"), self.clear_temp_cache,
+            tr("Превью и раскадровки — создаются заново при следующем открытии")))
+        cache_row.addWidget(self._ghost(
+            tr("Удалить скачанные видео…"), self.delete_downloads,
+            tr("Файлы из папки загрузок — это ваши видео, они удаляются навсегда")))
+        cache_row.addStretch(1)
+        outer.addLayout(cache_row)
+
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         close = QPushButton(tr("Готово"))
@@ -457,7 +474,72 @@ class MainWindow(QMainWindow):
         outer.addLayout(buttons)
         return dialog
 
+    # ------------------------------------------------------------- кэш ----
+    def _downloaded_files(self) -> list:
+        """Видео в папке загрузок — только файлы, вложенные папки не трогаем."""
+        folder = Path(self.dir_edit.text().strip() or default_download_dir())
+        if not folder.is_dir():
+            return []
+        return [item for item in folder.iterdir()
+                if item.is_file() and item.suffix.lower() in VIDEO_SUFFIXES]
+
+    def _refresh_cache_info(self) -> None:
+        files = self._downloaded_files()
+        downloads = sum(item.stat().st_size for item in files if item.exists())
+        temp = sum(storage.folder_size(folder) for folder in storage.temp_dirs())
+        self.cache_label.setText(
+            tr("Скачанные видео: {count} шт., {size}. Служебные файлы: {temp_size}.").format(
+                count=len(files), size=storage.human_size(downloads),
+                temp_size=storage.human_size(temp)))
+
+    def clear_temp_cache(self) -> None:
+        """Превью и раскадровки: удаляются без вопросов — они восстановимы."""
+        self._stop_proxy()
+        if self.thumb_worker and self.thumb_worker.isRunning():
+            self.thumb_worker.cancel()
+            self.thumb_worker.wait(2000)
+        self.thumbnails = []
+        freed = 0
+        for folder in storage.temp_dirs():
+            freed += storage.folder_size(folder)
+            shutil.rmtree(folder, ignore_errors=True)
+        self.log(tr("Служебные файлы удалены, освобождено {size}.").format(
+            size=storage.human_size(freed)))
+        self._refresh_cache_info()
+
+    def delete_downloads(self) -> None:
+        """Скачанные ролики — это файлы пользователя, поэтому спрашиваем."""
+        files = self._downloaded_files()
+        if not files:
+            QMessageBox.information(self, APP_NAME, tr("Папка загрузок пуста."))
+            return
+        total = sum(item.stat().st_size for item in files)
+        folder = files[0].parent
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            tr("Удалить {count} видео из {folder} ({size})?"
+               " Файлы будут стёрты безвозвратно.").format(
+                   count=len(files), folder=folder, size=storage.human_size(total)))
+        if answer != QMessageBox.Yes:
+            return
+        # Открытый файл держит проигрыватель — освобождаем, иначе не удалится.
+        self.player.setSource(QUrl())
+        self.source = None
+        failed = []
+        for item in files:
+            try:
+                item.unlink()
+            except OSError as exc:
+                failed.append(f"{item.name}: {exc}")
+        self.log(tr("Удалено видео: {count}.").format(count=len(files) - len(failed)))
+        if failed:
+            QMessageBox.warning(self, APP_NAME,
+                                tr("Не удалось удалить:") + chr(10) + chr(10)
+                                + chr(10).join(failed[:5]))
+        self._refresh_cache_info()
+
     def show_settings(self) -> None:
+        self._refresh_cache_info()
         self.settings_dialog.show()
         self.settings_dialog.raise_()
         self.settings_dialog.activateWindow()
@@ -502,7 +584,8 @@ class MainWindow(QMainWindow):
 
         # Выделение фрагмента живёт прямо на дорожке — отдельная панель не нужна.
         self.timeline = TimelineWidget()
-        self.timeline.positionMoved.connect(self.player.setPosition)
+        self.timeline.positionMoved.connect(self._on_timeline_seek)
+        self.timeline.scrubFinished.connect(self._on_scrub_finished)
         self.timeline.rangeChanged.connect(self._on_timeline_range)
         self.timeline.previewRequested.connect(self._on_preview_scrub)
         self.timeline.previewFinished.connect(self._on_preview_finished)
@@ -909,7 +992,10 @@ class MainWindow(QMainWindow):
 
     def _on_thumbnails_ready(self, frames: list) -> None:
         """Приходит дважды: сперва редкая сетка, потом плотная."""
-        if not frames or len(frames) < len(self.thumbnails):
+        if not frames:
+            self.log(tr("Раскадровка не получилась — предпросмотр будет медленнее."))
+            return
+        if len(frames) < len(self.thumbnails):
             return
         self.thumbnails = frames
         self.log(tr("Предпросмотр: {count} кадров.").format(count=len(frames)))
@@ -975,6 +1061,24 @@ class MainWindow(QMainWindow):
             self.timeline.set_range(0, ms)
         self._update_range_label()
 
+
+    def _on_timeline_seek(self, ms: int) -> None:
+        """Тянут позицию по дорожке: показываем кадр, плеер трогаем в конце.
+
+        Перемотка плеера занимает сотни миллисекунд и за мышью не поспевает,
+        поэтому во время перетаскивания рисуем готовый кадр раскадровки.
+        """
+        self._scrub_target = ms
+        if self._show_scrub_frame(ms):
+            return
+        self.player.setPosition(ms)          # раскадровки ещё нет — как раньше
+
+    def _on_scrub_finished(self) -> None:
+        """Отпустили дорожку — доводим плеер до выбранной позиции."""
+        self.scrub_view.setVisible(False)
+        if self._scrub_target is not None:
+            self.player.setPosition(self._scrub_target)
+            self._scrub_target = None
 
     def _on_preview_scrub(self, ms: int) -> None:
         """Метку тянут — показываем кадр под ней, не теряя позицию плеера."""

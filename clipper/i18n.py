@@ -66,6 +66,22 @@ EN = {
         "Some sites (TikTok, Instagram) refuse datacenter and VPN addresses. "
         "Route downloads through your own proxy here.",
     "Папка загрузок, cookies, прокси": "Download folder, cookies, proxy",
+    "ХРАНЕНИЕ": "STORAGE",
+    "Очистить служебные файлы": "Clear temporary files",
+    "Превью и раскадровки — создаются заново при следующем открытии":
+        "Previews and frame strips — rebuilt next time you open a video",
+    "Удалить скачанные видео…": "Delete downloaded videos…",
+    "Файлы из папки загрузок — это ваши видео, они удаляются навсегда":
+        "Files in the download folder are your videos; deletion is permanent",
+    "Скачанные видео: {count} шт., {size}. Служебные файлы: {temp_size}.":
+        "Downloaded videos: {count}, {size}. Temporary files: {temp_size}.",
+    "Служебные файлы удалены, освобождено {size}.":
+        "Temporary files removed, {size} freed.",
+    "Папка загрузок пуста.": "The download folder is empty.",
+    "Удалить {count} видео из {folder} ({size})? Файлы будут стёрты безвозвратно.":
+        "Delete {count} videos from {folder} ({size})? This cannot be undone.",
+    "Удалено видео: {count}.": "Videos deleted: {count}.",
+    "Не удалось удалить:": "Could not delete:",
     "Авто": "Auto",
     "Не использовать": "Don't use",
 
@@ -167,6 +183,8 @@ EN = {
     "Превью не получилось: {message}": "Preview failed: {message}",
     "Не удалось подготовить превью": "Could not prepare the preview",
     "Предпросмотр: {count} кадров.": "Preview: {count} frames.",
+    "Раскадровка не получилась — предпросмотр будет медленнее.":
+        "Could not build the frame strip — preview will be slower.",
     "Проигрыватель: {message}": "Player: {message}",
     "Файл: {name} — {width}x{height}, {fps:.2f} к/с, {duration}":
         "File: {name} — {width}x{height}, {fps:.2f} fps, {duration}",

@@ -54,3 +54,34 @@ def default_download_dir() -> Path:
         return app_dir() / "Downloads"
     folder = "Movies" if sys.platform == "darwin" else "Videos"
     return Path.home() / folder / APP_NAME
+
+
+def temp_dirs() -> list:
+    """Служебные каталоги: превью для неиграбельных кодеков и раскадровки."""
+    import tempfile
+
+    base = Path(tempfile.gettempdir())
+    return [base / "clipper_preview", base / "clipper_thumbs"]
+
+
+def folder_size(path: Path) -> int:
+    """Сколько занимает каталог, без падений на исчезнувших файлах."""
+    if not path.exists():
+        return 0
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def human_size(size: int) -> str:
+    value = float(size)
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if value < 1024 or unit == "ГБ":
+            return f"{value:.0f} {unit}" if unit in ("Б", "КБ") else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} ГБ"

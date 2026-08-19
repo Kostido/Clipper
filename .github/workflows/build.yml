@@ -40,6 +40,11 @@ jobs:
       - name: Иконка
         run: python tools/make_icon.py
 
+      - name: Тесты интерфейса
+        run: |
+          python tools/test_cache.py
+          python tools/test_i18n.py
+
       - name: Сборка exe
         run: pyinstaller --noconfirm Clipper.spec
 
