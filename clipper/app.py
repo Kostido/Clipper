@@ -8,7 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QRectF, QSettings, QSize, QUrl, QTimer
+from PySide6.QtCore import QEvent, Qt, QRect, QRectF, QSettings, QSize, QUrl, QTimer
 from PySide6.QtGui import (QActionGroup, QColor, QDesktopServices, QFont,
                            QIcon, QPainter, QPainterPath, QPixmap)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -23,7 +23,7 @@ from . import __version__, downloader, ffmpeg_tools, storage, updater
 from . import i18n
 from .i18n import tr
 from .timecode import format_tc
-from .timeline import TimelineWidget
+from .timeline import TimelineWidget, clip_length_text
 from .workers import (DownloadWorker, ExportWorker, PreviewProxyWorker,
                       ThumbnailWorker, UpdateCheckWorker, UpdateDownloadWorker)
 
@@ -339,8 +339,15 @@ class MainWindow(QMainWindow):
             (Qt.Key_Right, Qt.ShiftModifier): lambda: self.nudge(0.1),
         }
         QApplication.instance().installEventFilter(self)
+        # Область видео меняет размер и без ресайза окна (сплиттер, раскладка
+        # после показа) — оверлеи обязаны ехать за ней, иначе кадр предпросмотра
+        # рисуется мимо картинки.
+        self.video_widget.installEventFilter(self)
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 — Qt API
+        if obj is self.video_widget and event.type() == QEvent.Resize:
+            self._place_drop_hint()
+            return super().eventFilter(obj, event)
         if event.type() != QEvent.KeyPress or not self.isActiveWindow():
             return super().eventFilter(obj, event)
         focused = QApplication.focusWidget()
@@ -909,7 +916,9 @@ class MainWindow(QMainWindow):
     def _place_drop_hint(self) -> None:
         area = (0, 0, self.video_widget.width(), self.video_widget.height())
         self.drop_hint.setGeometry(*area)
-        self.scrub_view.setGeometry(*area)
+        if self.scrub_view.geometry() != QRect(*area):
+            self.scrub_view.setGeometry(*area)
+            self._rescale_scrub_frame()
 
     def load_media(self, path: Path) -> None:
         self.source = path
@@ -931,6 +940,7 @@ class MainWindow(QMainWindow):
         if ffmpeg_tools.needs_preview_proxy(self.info):
             self._start_preview_proxy(path)
         duration_ms = int((self.info.duration if self.info else 0) * 1000)
+        self.timeline.set_fps(self.info.fps if self.info else 0.0)
         self.timeline.set_duration(duration_ms)
         self.timeline.set_range(0, duration_ms)
         self._update_range_label()
@@ -1016,11 +1026,20 @@ class MainWindow(QMainWindow):
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
             return False
-        self.scrub_view.setPixmap(pixmap.scaled(
-            self.scrub_view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        # Размер могли поменять между кадрами — держим оверлей ровно по видео.
+        self._place_drop_hint()
+        self._scrub_pixmap = pixmap
+        self._rescale_scrub_frame()
         self.scrub_view.setVisible(True)
         self.scrub_view.raise_()
         return True
+
+    def _rescale_scrub_frame(self) -> None:
+        pixmap = getattr(self, "_scrub_pixmap", None)
+        if pixmap is None or pixmap.isNull() or self.scrub_view.width() <= 0:
+            return
+        self.scrub_view.setPixmap(pixmap.scaled(
+            self.scrub_view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -1071,11 +1090,18 @@ class MainWindow(QMainWindow):
         self._scrub_target = ms
         if self._show_scrub_frame(ms):
             return
-        self.player.setPosition(ms)          # раскадровки ещё нет — как раньше
+        # Раскадровки ещё нет: перематываем сам плеер, но не чаще таймера —
+        # seek на каждое движение мыши он не переваривает и картинка встаёт.
+        self._pending_seek = ms
+        if not self._seek_timer.isActive():
+            self._apply_pending_seek()
+            self._seek_timer.start()
 
     def _on_scrub_finished(self) -> None:
         """Отпустили дорожку — доводим плеер до выбранной позиции."""
         self.scrub_view.setVisible(False)
+        self._seek_timer.stop()
+        self._pending_seek = None
         if self._scrub_target is not None:
             self.player.setPosition(self._scrub_target)
             self._scrub_target = None
@@ -1172,9 +1198,15 @@ class MainWindow(QMainWindow):
     def _update_range_label(self) -> None:
         start, end = self.trim_range()
         length = max(0.0, end - start)
+        if not length:
+            self.range_label.setText(tr("Фрагмент: —"))
+            return
+        fps = self.info.fps if self.info else 0.0
         self.range_label.setText(
-            tr("Фрагмент: {start} → {end}   ({length:6.1f} с)").format(start=format_tc(start), end=format_tc(end), length=length)
-            if length else tr("Фрагмент: —")
+            tr("Фрагмент: {start} → {end}   ({length})").format(
+                start=format_tc(start), end=format_tc(end),
+                length=clip_length_text(int(round(length * 1000)), fps, short=False),
+            )
         )
 
 

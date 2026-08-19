@@ -37,6 +37,7 @@ class TimelineWidget(QWidget):
         self._position = 0
         self._in = 0
         self._out = 0
+        self._fps = 0.0
         self._drag: str | None = None    # in | out | scrub
         self._hover: str | None = None
         self.setMouseTracking(True)
@@ -66,6 +67,13 @@ class TimelineWidget(QWidget):
 
     def set_position(self, ms: int) -> None:
         self._position = max(0, int(ms))
+        self.update()
+
+    def fps(self) -> float:
+        return self._fps
+
+    def set_fps(self, fps: float) -> None:
+        self._fps = max(0.0, float(fps or 0.0))
         self.update()
 
     def range(self) -> tuple[int, int]:
@@ -192,10 +200,24 @@ class TimelineWidget(QWidget):
 
         if self._drag in ("in", "out"):
             self._draw_preview_marker(painter, track)
+        self._draw_length(painter, selection)
         self._draw_playhead(painter, track)
         self._draw_handle(painter, x_in, track, "in")
         self._draw_handle(painter, x_out, track, "out")
         self._draw_labels(painter, x_in, x_out)
+
+    def _draw_length(self, painter: QPainter, selection: QRectF) -> None:
+        """Длина куска прямо на нём: сначала кадры, если они известны."""
+        text = clip_length_text(self._out - self._in, self._fps)
+        font = QFont("Consolas")
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        width = painter.fontMetrics().horizontalAdvance(text)
+        if width + 14 > selection.width():      # не влезает — не мусорим
+            return
+        painter.setPen(QPen(QColor("#e8edff")))
+        painter.drawText(selection, Qt.AlignCenter, text)
 
     def _draw_preview_marker(self, painter: QPainter, track: QRectF) -> None:
         """Пунктир там, где сейчас стоит показанный в плеере кадр."""
@@ -225,12 +247,56 @@ class TimelineWidget(QWidget):
         painter.setFont(font)
         painter.setPen(QPen(TEXT))
         metrics = painter.fontMetrics()
-        for x, text, to_left in ((x_in, _tc(self._in), False), (x_out, _tc(self._out), True)):
-            width = metrics.horizontalAdvance(text)
+        in_text, out_text = _tc(self._in), _tc(self._out)
+        in_w, out_w = metrics.horizontalAdvance(in_text), metrics.horizontalAdvance(out_text)
+        # На узком выделении подписи налезают друг на друга — сливаем их в одну.
+        if (x_out - out_w - 4) - (x_in + 4) < in_w:
+            joined = f"{in_text} → {out_text}"
+            width = metrics.horizontalAdvance(joined)
+            left = max(0.0, min((x_in + x_out) / 2 - width / 2, self.width() - width))
+            painter.drawText(QRectF(left, 0, width, LABEL_H),
+                             Qt.AlignVCenter | Qt.AlignLeft, joined)
+            return
+        for x, text, width, to_left in ((x_in, in_text, in_w, False),
+                                        (x_out, out_text, out_w, True)):
             left = x - width - 4 if to_left else x + 4
             left = max(0.0, min(left, self.width() - width))
             painter.drawText(QRectF(left, 0, width, LABEL_H),
                              Qt.AlignVCenter | Qt.AlignLeft, text)
+
+
+def frame_count(ms: int, fps: float) -> int | None:
+    """Сколько кадров в куске. None — если частота кадров неизвестна."""
+    if not fps or fps <= 0:
+        return None
+    return int(round(ms / 1000 * fps))
+
+
+def clip_length_text(ms: int, fps: float, short: bool = True) -> str:
+    """«4.75 с · 142 к» — коротко для дорожки, длинно для подписи под ней."""
+    seconds = max(0, ms) / 1000
+    frames = frame_count(ms, fps)
+    if frames is None:
+        return tr("{seconds:.2f} с").format(seconds=seconds)
+    if short:
+        return tr("{seconds:.2f} с · {frames} к").format(seconds=seconds, frames=frames)
+    return tr("{seconds:.2f} с · {frames} {word}").format(
+        seconds=seconds, frames=frames, word=_frames_word(frames))
+
+
+def _frames_word(count: int) -> str:
+    """Склонение «кадр/кадра/кадров»; в английской локали всегда frames."""
+    english = tr("кадров") != "кадров"
+    if english:
+        return tr("кадр") if count == 1 else tr("кадров")
+    tail_100, tail_10 = count % 100, count % 10
+    if 11 <= tail_100 <= 14:
+        return "кадров"
+    if tail_10 == 1:
+        return "кадр"
+    if 2 <= tail_10 <= 4:
+        return "кадра"
+    return "кадров"
 
 
 def _tc(ms: int) -> str:

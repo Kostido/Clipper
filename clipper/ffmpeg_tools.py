@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -340,6 +341,11 @@ def make_preview_proxy(
     return dst
 
 
+def _thumb_workers() -> int:
+    """Кадры режутся независимыми вызовами ffmpeg — грузим все ядра, но не машину целиком."""
+    return max(2, min(8, (os.cpu_count() or 4)))
+
+
 def extract_thumbnails(
     src: Path,
     out_dir: Path,
@@ -384,7 +390,7 @@ def extract_thumbnails(
             return moment, None
         return moment, target
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=_thumb_workers()) as pool:
         frames = list(pool.map(grab, jobs))
 
     if should_cancel and should_cancel():

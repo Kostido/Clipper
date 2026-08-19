@@ -96,8 +96,13 @@ EN = {
     "Фрагмент": "Clip",
     "Сбросить": "Reset",
     "Фрагмент: —": "Clip: —",
-    "Фрагмент: {start} → {end}   ({length:6.1f} с)":
-        "Clip: {start} → {end}   ({length:6.1f} s)",
+    "Фрагмент: {start} → {end}   ({length})":
+        "Clip: {start} → {end}   ({length})",
+    "{seconds:.2f} с": "{seconds:.2f} s",
+    "{seconds:.2f} с · {frames} к": "{seconds:.2f} s · {frames} f",
+    "{seconds:.2f} с · {frames} {word}": "{seconds:.2f} s · {frames} {word}",
+    "кадр": "frame",
+    "кадров": "frames",
     "Клавиша I — начало фрагмента по текущей позиции":
         "Key I — set clip start at the playhead",
     "Клавиша O — конец фрагмента по текущей позиции":
