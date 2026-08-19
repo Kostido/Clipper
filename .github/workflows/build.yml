@@ -1,11 +1,18 @@
 name: build
 
 # Собирает Windows-exe, портативный архив и macOS-бандл.
-# Запуск вручную (workflow_dispatch) или по тегу v* — тогда файлы
-# прикрепляются к релизу, и автообновление в программе их подхватывает.
+#
+# Релиз выпускается двумя способами, оба прикрепляют файлы к релизу, откуда их
+# забирает автообновление:
+#   * тег v* — как раньше;
+#   * коммит в любую ветку со словом [release] в сообщении — тег берётся из
+#     __version__ в clipper/__init__.py. Так релиз можно выпустить без прав на
+#     создание тегов, одним обычным пушем.
+# Обычные коммиты без маркера сборку не запускают: она долгая и здесь не нужна.
 on:
   push:
     tags: ["v*"]
+    branches: ["**"]
   workflow_dispatch:
 
 permissions:
@@ -20,6 +27,9 @@ env:
 
 jobs:
   windows:
+    if: >-
+      github.event_name != 'push' || github.ref_type == 'tag'
+      || contains(github.event.head_commit.message, '[release]')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,6 +76,9 @@ jobs:
             dist/Clipper-portable-win64.zip
 
   macos:
+    if: >-
+      github.event_name != 'push' || github.ref_type == 'tag'
+      || contains(github.event.head_commit.message, '[release]')
     runs-on: macos-14          # Apple Silicon
     steps:
       - uses: actions/checkout@v4
@@ -115,10 +128,27 @@ jobs:
           path: dist/Clipper-macos.zip
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      github.ref_type == 'tag'
+      || (github.event_name == 'push'
+          && contains(github.event.head_commit.message, '[release]'))
     needs: [windows, macos]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Версия релиза
+        id: version
+        # По тегу берём его имя, по маркеру [release] — версию из кода:
+        # __version__ и есть источник правды, руками её дублировать незачем.
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            version=$(python3 -c "import clipper; print(clipper.__version__)")
+            echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -126,6 +156,8 @@ jobs:
       - name: Прикрепить файлы к релизу
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: |
             artifacts/windows/Clipper.exe
             artifacts/windows/Clipper-portable-win64.zip
