@@ -7,7 +7,9 @@ import os
 import re
 import sys
 import shutil
+import socket
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -205,6 +207,7 @@ def download(
     if runtimes:
         opts["js_runtimes"] = runtimes
     _prepare_pot()
+    _warn_if_proxy_dead(proxy, on_log)
     if proxy:
         # Пустая строка у yt-dlp означает «строго напрямую», поэтому пишем
         # значение только когда пользователь его задал.
@@ -403,6 +406,10 @@ def _extract_with_retries(opts: dict, url: str, on_log, save_cookies_to: Path | 
             except Exception as exc:  # noqa: BLE001
                 fix = _pick_mitigation(exc, url, applied)
                 if not fix:
+                    # Финальной ошибке нужен контекст: без него отказ сайта,
+                    # полученный уже в обход мёртвого прокси, выглядит как
+                    # самостоятельная беда и уводит от настоящей причины.
+                    _remember_applied(exc, applied)
                     raise
                 name, message, apply = fix
                 applied.add(name)
@@ -410,6 +417,45 @@ def _extract_with_retries(opts: dict, url: str, on_log, save_cookies_to: Path | 
                     on_log(message)
                 apply(attempt_opts, stack)
         raise RuntimeError("Не удалось скачать: перебраны все обходные пути.")
+
+
+def system_proxy() -> str:
+    """Прокси, прописанный в системе: на Windows его читают из реестра."""
+    proxies = urllib.request.getproxies()
+    return proxies.get("https") or proxies.get("http") or ""
+
+
+def proxy_alive(proxy_url: str, timeout: float = 1.5) -> bool:
+    """Отвечает ли прокси вообще: одно короткое TCP-соединение."""
+    parsed = urllib.parse.urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
+    if not parsed.hostname:
+        return True                      # разобрать не смогли — не пугаем зря
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((parsed.hostname, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _warn_if_proxy_dead(proxy: Optional[str], on_log) -> None:
+    """Сказать про выключенный VPN сразу, а не после цепочки странных ошибок.
+
+    Классика: в системе остался прокси от VPN-клиента, сам клиент не запущен —
+    и сайт отвечает то 404, то отказом, будто дело в ссылке.
+    """
+    target = proxy or system_proxy()
+    if not target or not on_log or proxy_alive(target):
+        return
+    on_log(f"Прокси {target} не отвечает — похоже, VPN-клиент не запущен. "
+           "Заблокированные сайты без него не откроются.")
+
+
+def _remember_applied(exc: Exception, applied: set) -> None:
+    try:
+        exc._clipper_applied = tuple(sorted(applied))   # noqa: SLF001
+    except Exception:  # noqa: BLE001 — на исключение не всегда можно писать
+        pass
 
 
 def _fix_proxy(opts: dict, stack) -> None:
@@ -669,11 +715,56 @@ _LOGIN_HINTS = (
 )
 
 
+def _looks_like_not_found(exc: Exception) -> bool:
+    low = str(exc).lower()
+    return "404" in low and "not found" in low
+
+
 def _friendly_error(exc: Exception, url: str, tried: list | None = None) -> Exception:
     if getattr(exc, "_clipper_friendly", False):
         return exc
     text = str(exc)
     low = text.lower()
+    applied = set(getattr(exc, "_clipper_applied", ()))
+    if _looks_like_not_found(exc) and "proxy" in applied:
+        # Прокси в системе прописан, клиент не запущен: мы обошли его напрямую,
+        # и уже там сайт ответил 404. У заблокированных сайтов это обычное дело —
+        # настоящая причина не в ссылке, а в том, что VPN выключен.
+        return _mark(RuntimeError(chr(10).join([
+            "Системный прокси не отвечает, а напрямую сайт вернул «страница не найдена».",
+            "",
+            "Похоже, VPN-клиент не запущен: в Windows прокси прописан, но соединения "
+            "через него нет, а без него сайт недоступен — провайдер отдаёт вместо "
+            "страницы ошибку.",
+            "",
+            "Что сделать:",
+            "1. Запустить VPN-клиент и повторить — это лечит и то, и другое.",
+            "2. Если VPN не нужен, снять прокси: «Параметры → Сеть и Интернет →",
+            "   Прокси-сервер» — тогда программа пойдёт напрямую без обходов.",
+            "3. Проверить ссылку в браузере: если и там 404, видео удалили или",
+            "   скрыли — для скрытых видео Vimeo нужна полная ссылка вида",
+            "   vimeo.com/номер/буквенный-код.",
+            "",
+            "Исходная ошибка:",
+            text,
+        ])))
+    if _looks_like_not_found(exc):
+        return _mark(RuntimeError(chr(10).join([
+            "Сайт отвечает «страница не найдена» (404).",
+            "",
+            "Что бывает:",
+            "1. Видео удалили или сделали приватным.",
+            "2. Ссылка неполная: у скрытых видео Vimeo она выглядит как",
+            "   vimeo.com/номер/буквенный-код — код обязателен.",
+            "3. Сайт недоступен без VPN, и провайдер подменяет ответ — включите VPN",
+            "   и повторите.",
+            "",
+            "Откройте ссылку в браузере: если видео там играет, скопируйте адрес",
+            "из адресной строки целиком.",
+            "",
+            "Исходная ошибка:",
+            text,
+        ])))
     if _looks_like_bot_wall(exc) or ("403" in low and "tiktok" in low):
         lines = [
             "Сайт не пустил программу: сработала защита от автоматических запросов.",

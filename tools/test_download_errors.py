@@ -86,5 +86,54 @@ else:
 # 4) недоступную цель не подставляем — иначе yt-dlp падает до запроса
 assert dl._impersonate_like("netscape-1") is None
 
+# 5) 404 после обхода мёртвого прокси — это про выключенный VPN, а не про ссылку
+print("5) 404 в обход мёртвого прокси:")
+after_proxy = RuntimeError(
+    "ERROR: [vimeo] 448040068: Unable to download webpage: HTTP Error 404: Not Found "
+    "(caused by <HTTPError 404: Not Found>)"
+)
+dl._remember_applied(after_proxy, {"proxy"})
+assert after_proxy._clipper_applied == ("proxy",), "меры не запомнились на исключении"
+message = str(dl._friendly_error(after_proxy, "https://vimeo.com/448040068?share=copy"))
+print("   " + message.splitlines()[0])
+assert "Системный прокси не отвечает" in message
+assert "Запустить VPN-клиент" in message
+assert "vimeo.com/номер/буквенный-код" in message, "нет подсказки про скрытые видео"
+
+# 6) тот же 404 без обхода прокси объясняется по-другому
+print("6) 404 сам по себе:")
+plain_404 = RuntimeError("Unable to download webpage: HTTP Error 404: Not Found")
+message = str(dl._friendly_error(plain_404, "https://vimeo.com/448040068"))
+print("   " + message.splitlines()[0])
+assert "страница не найдена" in message
+assert "Системный прокси не отвечает" not in message, "приписали прокси, которого не было"
+
+# 7) о неработающем прокси предупреждаем сразу, до первой попытки
+print("7) ранняя проверка прокси:")
+import socket as _socket
+
+free = _socket.socket()
+free.bind(("127.0.0.1", 0))
+dead_port = free.getsockname()[1]
+free.close()                      # порт освободили — подключиться туда некому
+assert not dl.proxy_alive(f"http://127.0.0.1:{dead_port}"), "мёртвый прокси признан живым"
+
+listener = _socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+alive_port = listener.getsockname()[1]
+assert dl.proxy_alive(f"http://127.0.0.1:{alive_port}"), "живой прокси признан мёртвым"
+listener.close()
+
+notes = []
+dl._warn_if_proxy_dead(f"http://127.0.0.1:{dead_port}", notes.append)
+print("   " + (notes[0] if notes else "(промолчал)"))
+assert notes and "VPN-клиент не запущен" in notes[0]
+notes.clear()
+dl._warn_if_proxy_dead("", notes.append)      # прокси не задан — молчим
+dl._warn_if_proxy_dead(None, lambda _m: notes.append("вызвали без прокси"))
+assert not any("вызвали" in n for n in notes) or dl.system_proxy(), \
+    "предупредили о прокси, которого нет"
+
 print("OK: 403 от сайта разбирается верно, прокси-диагностика на месте, "
       "смена браузера включена")
