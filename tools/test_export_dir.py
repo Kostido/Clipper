@@ -25,6 +25,9 @@ for folder in (downloads, first, second):
 win = app_mod.MainWindow()
 win.settings.remove("export_dir")
 win.export_dir = None
+# Тест про папку, а не про формат: он запоминается между запусками, поэтому
+# задаём его явно, иначе имя файла зависит от прошлого сеанса.
+win.format_combo.setCurrentIndex(0)
 win.dir_edit.setText(str(downloads))
 win.source = downloads / "lecture.mp4"
 win.source.write_bytes(b"")
@@ -53,6 +56,7 @@ assert win._suggested_export_path().parent == second
 # 5) новое окно (перезапуск программы) — папка на месте
 win.close()
 again = app_mod.MainWindow()
+again.format_combo.setCurrentIndex(0)
 again.dir_edit.setText(str(downloads))
 again.source = win.source
 print(f"5) после перезапуска: {again._suggested_export_path()}")

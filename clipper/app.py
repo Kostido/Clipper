@@ -45,6 +45,16 @@ BITRATES = [(tr("Авто (по разрешению)"), 0), (tr("1,5 Мбит/�
             (tr("3 Мбит/с"), 3000), (tr("5 Мбит/с — обычный"), 5000),
             (tr("8 Мбит/с — высокий"), 8000), (tr("12 Мбит/с"), 12000),
             (tr("20 Мбит/с — максимум"), 20000)]
+# Что получаем на выходе: подпись для списка и ключ формата.
+OUTPUT_FORMATS = [(tr("MP4 · H.264"), ffmpeg_tools.FORMAT_MP4),
+                  (tr("WebM · VP9"), ffmpeg_tools.FORMAT_WEBM),
+                  (tr("MP3 · только звук"), ffmpeg_tools.FORMAT_MP3)]
+AUDIO_BITRATES = ["320k", "256k", "192k", "160k", "128k", "96k"]
+SAVE_FILTERS = {
+    ffmpeg_tools.FORMAT_MP4: "MP4 (H.264) (*.mp4)",
+    ffmpeg_tools.FORMAT_WEBM: "WebM (VP9) (*.webm)",
+    ffmpeg_tools.FORMAT_MP3: "MP3 (*.mp3)",
+}
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".flv",
                   ".mpg", ".mpeg", ".wmv", ".ts", ".m2ts", ".3gp", ".ogv"}
 BROWSERS = [downloader.BROWSER_AUTO, tr("Не использовать"),
@@ -649,8 +659,16 @@ class MainWindow(QMainWindow):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        row.addWidget(self._label(tr("H.264"), "section"))
-        row.addSpacing(8)
+
+        self.format_combo = QComboBox()
+        for label, key in OUTPUT_FORMATS:
+            self.format_combo.addItem(label, key)
+        self.format_combo.setFixedWidth(168)
+        self.format_combo.setToolTip(
+            "MP4 — везде открывается. WebM — для сайтов, весит меньше. "
+            "MP3 — забрать из видео только звук.")
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        row.addWidget(self.format_combo)
 
         self.bitrate_combo = QComboBox()
         for label, _ in BITRATES:
@@ -683,12 +701,32 @@ class MainWindow(QMainWindow):
         self.fps_combo.setToolTip(tr("Кадры в секунду"))
         row.addWidget(self.fps_combo)
 
+        self.audio_combo = QComboBox()
+        self.audio_combo.addItems(AUDIO_BITRATES)
+        self.audio_combo.setCurrentText("192k")
+        self.audio_combo.setFixedWidth(96)
+        self.audio_combo.setToolTip(tr("Битрейт звука"))
+        self.audio_combo.setVisible(False)      # нужен только для MP3
+        row.addWidget(self.audio_combo)
+
         self.copy_check = QCheckBox(tr("Без перекодирования"))
         self.copy_check.setToolTip(
             "Мгновенная нарезка копированием потока. Режет по ключевым кадрам, "
             "поэтому границы могут сместиться на пару секунд.")
         self.copy_check.toggled.connect(self._on_copy_toggled)
         row.addWidget(self.copy_check)
+
+        self.mute_check = QCheckBox(tr("Без звука"))
+        self.mute_check.setToolTip(tr("Выбросить звуковую дорожку из результата"))
+        row.addWidget(self.mute_check)
+
+        self.loop_check = QCheckBox(tr("Зациклить"))
+        self.loop_check.setToolTip(
+            "Помечает файл как зацикленный и убирает звук: сайты и мессенджеры "
+            "крутят такое видео по кругу. Длительность не меняется, обычный "
+            "плеер на компьютере метку игнорирует.")
+        self.loop_check.toggled.connect(self._on_loop_toggled)
+        row.addWidget(self.loop_check)
 
         row.addStretch(1)
         self.open_folder_btn = self._ghost(tr("Папка"), self.open_output_dir,
@@ -743,6 +781,14 @@ class MainWindow(QMainWindow):
             self.settings.value("autoupdate", True, type=bool)
         )
         self.proxy_edit.setText(self.settings.value("proxy", "", type=str))
+        saved_format = self.settings.value("format", ffmpeg_tools.FORMAT_MP4, type=str)
+        index = self.format_combo.findData(saved_format)
+        self.format_combo.setCurrentIndex(max(0, index))
+        self.audio_combo.setCurrentText(
+            self.settings.value("audio_bitrate", "192k", type=str))
+        self.mute_check.setChecked(self.settings.value("mute", False, type=bool))
+        self.loop_check.setChecked(self.settings.value("loop", False, type=bool))
+        self._sync_render_controls()
         saved_cookies = self.settings.value("cookies_file", type=str)
         if saved_cookies and Path(saved_cookies).exists():
             self._set_cookies_file(Path(saved_cookies))
@@ -759,6 +805,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue("preset", self.preset_combo.currentText())
         self.settings.setValue("browser", self.browser_combo.currentData())
         self.settings.setValue("proxy", self.proxy_edit.text().strip())
+        self.settings.setValue("format", self.output_format())
+        self.settings.setValue("audio_bitrate", self.audio_combo.currentText())
+        self.settings.setValue("mute", self.mute_check.isChecked())
+        self.settings.setValue("loop", self.loop_check.isChecked())
         self.settings.setValue("autoupdate", self.autoupdate_action.isChecked())
         self.settings.setValue(
             "cookies_file", str(self.cookies_file) if self.cookies_file else "")
@@ -1297,16 +1347,52 @@ class MainWindow(QMainWindow):
 Исходники и релизы: {updater.RELEASES_URL}""")
 
     # ------------------------------------------------------------- export ---
-    def _on_copy_toggled(self, checked: bool) -> None:
+    def output_format(self) -> str:
+        return self.format_combo.currentData() or ffmpeg_tools.FORMAT_MP4
+
+    def _on_copy_toggled(self, checked: bool) -> None:  # noqa: ARG002 — сигнал Qt
+        self._sync_render_controls()
+
+    def _on_loop_toggled(self, checked: bool) -> None:
+        # Зацикленное видео идёт без звука — показываем это галочкой, а не
+        # молча выбрасываем дорожку при рендере.
+        if checked:
+            self.mute_check.setChecked(True)
+        self._sync_render_controls()
+
+    def _on_format_changed(self) -> None:
+        if self.output_format() == ffmpeg_tools.FORMAT_MP3:
+            # У звука ни разрешения, ни лупа — снимаем, чтобы не вводить в
+            # заблуждение выключенными, но отмеченными галочками.
+            self.loop_check.setChecked(False)
+            self.copy_check.setChecked(False)
+        self._sync_render_controls()
+
+    def _sync_render_controls(self) -> None:
+        """Доступность настроек: у каждого формата свой набор осмысленных."""
+        audio_only = self.output_format() == ffmpeg_tools.FORMAT_MP3
+        copying = self.copy_check.isChecked()
+        video_settings = not audio_only and not copying
+
+        # У звука нет ни разрешения, ни кадров, ни лупа — такие настройки
+        # прячем целиком: выключенное, но видимое поле только путает.
+        for widget in (self.bitrate_combo, self.res_combo, self.fps_combo,
+                       self.copy_check, self.mute_check, self.loop_check):
+            widget.setVisible(not audio_only)
+        self.preset_combo.setVisible(self.output_format() == ffmpeg_tools.FORMAT_MP4)
+        self.audio_combo.setVisible(audio_only or not self.mute_check.isChecked())
+
         for widget in (self.bitrate_combo, self.preset_combo, self.res_combo, self.fps_combo):
-            widget.setEnabled(not checked)
+            widget.setEnabled(video_settings)
+        self.mute_check.setEnabled(not self.loop_check.isChecked())
 
     def _suggested_export_path(self) -> Path:
         """Куда предложить сохранить: где сохраняли прошлый раз, иначе к загрузкам."""
         folder = self.export_dir if self.export_dir and self.export_dir.is_dir() else None
         if folder is None:
             folder = Path(self.dir_edit.text().strip() or ".")
-        name = f"{self.source.stem}_clip.mp4" if self.source else "clip.mp4"
+        suffix = ffmpeg_tools.FORMAT_SUFFIX.get(self.output_format(), ".mp4")
+        name = f"{self.source.stem}_clip{suffix}" if self.source else f"clip{suffix}"
         return folder / name
 
     def _remember_export_dir(self, folder: Path) -> None:
@@ -1330,15 +1416,17 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, str(ffmpeg_tools.FFmpegMissingError()))
             return
 
+        container = self.output_format()
+        suffix = ffmpeg_tools.FORMAT_SUFFIX.get(container, ".mp4")
         dst, _ = QFileDialog.getSaveFileName(
             self, tr("Сохранить фрагмент"), str(self._suggested_export_path()),
-            "MP4 (H.264) (*.mp4)"
+            SAVE_FILTERS[container]
         )
         if not dst:
             return
         dst_path = Path(dst)
-        if dst_path.suffix.lower() != ".mp4":
-            dst_path = dst_path.with_suffix(".mp4")
+        if dst_path.suffix.lower() != suffix:
+            dst_path = dst_path.with_suffix(suffix)
         self._remember_export_dir(dst_path.parent)
         if dst_path.resolve() == self.source.resolve():
             QMessageBox.warning(self, APP_NAME, tr("Нельзя записать результат поверх исходного файла."))
@@ -1351,7 +1439,11 @@ class MainWindow(QMainWindow):
             preset=self.preset_combo.currentText(),
             scale_height=RESOLUTIONS[self.res_combo.currentIndex()][1],
             fps=FPS_CHOICES[self.fps_combo.currentIndex()][1],
-            copy_mode=self.copy_check.isChecked(),
+            copy_mode=self.copy_check.isChecked() and container != ffmpeg_tools.FORMAT_MP3,
+            container=container,
+            audio_bitrate=self.audio_combo.currentText(),
+            mute=self.mute_check.isChecked() and container != ffmpeg_tools.FORMAT_MP3,
+            loop=self.loop_check.isChecked() and container != ffmpeg_tools.FORMAT_MP3,
         )
         self.export_progress.setValue(0)
         self.export_progress.setVisible(True)

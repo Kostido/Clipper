@@ -156,6 +156,16 @@ class FFmpegMissingError(RuntimeError):
         )
 
 
+# Что можно получить на выходе. Ключ хранится в настройках, поэтому менять
+# его нельзя — подписи берутся из интерфейса.
+FORMAT_MP4 = "mp4"
+FORMAT_WEBM = "webm"
+FORMAT_MP3 = "mp3"
+FORMATS = (FORMAT_MP4, FORMAT_WEBM, FORMAT_MP3)
+
+FORMAT_SUFFIX = {FORMAT_MP4: ".mp4", FORMAT_WEBM: ".webm", FORMAT_MP3: ".mp3"}
+
+
 @dataclass
 class ExportSettings:
     start: float
@@ -166,6 +176,19 @@ class ExportSettings:
     scale_height: int = 0          # 0 = как в исходнике
     fps: float = 0.0               # 0 = как в исходнике
     copy_mode: bool = False        # быстрая резка без перекодирования
+    container: str = FORMAT_MP4    # mp4 | webm | mp3
+    mute: bool = False             # выбросить звук из результата
+    loop: bool = False             # пометить файл как зацикленный
+
+    @property
+    def audio_off(self) -> bool:
+        """Зацикленное видео идёт без звука: так его крутят по кругу и сайты,
+        и мессенджеры — дорожка со звуком этому мешает."""
+        return self.mute or self.loop
+
+    @property
+    def suffix(self) -> str:
+        return FORMAT_SUFFIX.get(self.container, ".mp4")
 
 
 # Разумный битрейт под высоту кадра — если пользователь не выбрал свой.
@@ -194,34 +217,88 @@ def build_export_command(src: Path, dst: Path, s: ExportSettings) -> list[str]:
     cmd = [str(binary), "-hide_banner", "-nostats", "-progress", "pipe:2", "-y"]
     # -ss до -i = быстрый поиск; при перекодировании точность даёт -accurate_seek.
     cmd += ["-ss", f"{s.start:.3f}", "-i", str(src), "-t", f"{duration:.3f}"]
-    if s.copy_mode:
+    if s.container == FORMAT_MP3:
+        cmd += _mp3_args(s)
+    elif s.copy_mode:
         cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
+        if s.audio_off:
+            cmd += ["-an"]
+    elif s.container == FORMAT_WEBM:
+        cmd += _video_filters(s) + _webm_args(src, s)
     else:
-        filters = []
-        if s.scale_height:
-            filters.append(f"scale=-2:{s.scale_height}")
-        if s.fps:
-            filters.append(f"fps={s.fps:g}")
-        if filters:
-            cmd += ["-vf", ",".join(filters)]
-        bitrate = s.video_bitrate or default_bitrate(probe(src).height)
-        cmd += [
-            "-c:v", "libx264",
-            "-preset", s.preset,
-            # Постоянный битрейт: размер файла предсказуем. maxrate с bufsize
-            # держат поток в рамках, иначе x264 разгоняется на сложных сценах.
-            "-b:v", f"{bitrate}k",
-            "-maxrate", f"{bitrate}k",
-            "-bufsize", f"{bitrate * 2}k",
-            "-profile:v", "high",
-            "-level", "4.1",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", s.audio_bitrate,
-            "-movflags", "+faststart",
-        ]
+        cmd += _video_filters(s) + _mp4_args(src, s)
     cmd.append(str(dst))
     return cmd
+
+
+def _video_filters(s: ExportSettings) -> list[str]:
+    filters = []
+    if s.scale_height:
+        filters.append(f"scale=-2:{s.scale_height}")
+    if s.fps:
+        filters.append(f"fps={s.fps:g}")
+    return ["-vf", ",".join(filters)] if filters else []
+
+
+def _audio_args(s: ExportSettings, codec: str) -> list[str]:
+    return ["-an"] if s.audio_off else ["-c:a", codec, "-b:a", s.audio_bitrate]
+
+
+def _mp4_args(src: Path, s: ExportSettings) -> list[str]:
+    bitrate = s.video_bitrate or default_bitrate(probe(src).height)
+    return [
+        "-c:v", "libx264",
+        "-preset", s.preset,
+        # Постоянный битрейт: размер файла предсказуем. maxrate с bufsize
+        # держат поток в рамках, иначе x264 разгоняется на сложных сценах.
+        "-b:v", f"{bitrate}k",
+        "-maxrate", f"{bitrate}k",
+        "-bufsize", f"{bitrate * 2}k",
+        "-profile:v", "high",
+        "-level", "4.1",
+        "-pix_fmt", "yuv420p",
+        *_audio_args(s, "aac"),
+        "-movflags", "+faststart",
+    ] + _loop_args(s)
+
+
+def _webm_args(src: Path, s: ExportSettings) -> list[str]:
+    """VP9 в WebM: то, что понимают браузеры без плагинов.
+
+    row-mt и cpu-used выбраны ради скорости: у libvpx-vp9 качество на глаз
+    почти не страдает, а без них рендер минутного ролика тянется вечность.
+    """
+    bitrate = s.video_bitrate or default_bitrate(probe(src).height)
+    return [
+        "-c:v", "libvpx-vp9",
+        "-b:v", f"{bitrate}k",
+        "-maxrate", f"{bitrate}k",
+        "-bufsize", f"{bitrate * 2}k",
+        "-row-mt", "1",
+        "-deadline", "good",
+        "-cpu-used", "2",
+        "-pix_fmt", "yuv420p",
+        *_audio_args(s, "libopus"),
+    ] + _loop_args(s)
+
+
+def _loop_args(s: ExportSettings) -> list[str]:
+    """Метка зацикливания.
+
+    Своего флага «крутить по кругу» ни в WebM, ни в MP4 нет — его задаёт плеер.
+    Пишем тег, который читают браузеры и мессенджеры; всё остальное решает
+    отсутствие звуковой дорожки, по нему такие файлы и считают анимацией.
+    """
+    return ["-metadata", "loop=true"] if s.loop else []
+
+
+def _mp3_args(s: ExportSettings) -> list[str]:
+    return [
+        "-vn",                       # видео не нужно — забираем только звук
+        "-c:a", "libmp3lame",
+        "-b:a", s.audio_bitrate,
+        "-id3v2_version", "3",       # такие теги читают и Windows, и плееры
+    ]
 
 
 def export_clip(
