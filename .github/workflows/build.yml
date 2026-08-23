@@ -57,6 +57,7 @@ jobs:
           python tools/test_download_errors.py
           python tools/test_export_dir.py
           python tools/test_formats.py
+          python tools/test_resume.py
 
       - name: Сборка exe
         run: pyinstaller --noconfirm Clipper.spec

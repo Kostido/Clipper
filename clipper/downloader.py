@@ -6,6 +6,7 @@ import functools
 import os
 import re
 import sys
+import time
 import shutil
 import socket
 import urllib.parse
@@ -196,8 +197,13 @@ def download(
         "progress_hooks": [hook],
         "quiet": True,
         "no_warnings": True,
-        "retries": 5,
-        "fragment_retries": 5,
+        # Часовой ролик — это сотни мегабайт и десятки минут связи. На таком
+        # сроке обрыв почти неизбежен, поэтому терпения нужно много: пять
+        # попыток заканчивались на середине файла.
+        "retries": 20,
+        "fragment_retries": 20,
+        "file_access_retries": 5,
+        "socket_timeout": 30,
         "concurrent_fragment_downloads": 4,
         # Качаем кусками: ссылки YouTube протухают, и на середине прилетает 403 —
         # с кусками yt-dlp перезапрашивает только текущий отрезок.
@@ -398,9 +404,10 @@ def _save_cookies(ydl, path: Path, domain: str) -> None:
 def _extract_with_retries(opts: dict, url: str, on_log, save_cookies_to: Path | None = None) -> dict:
     """Применяем меры по одной, накапливая их: беды часто идут парами."""
     attempt_opts = dict(opts)
-    applied: set = set()
+    applied: dict = {}
+    attempts = len(_MITIGATIONS) + sum(_MITIGATION_LIMITS.values()) + 1
     with contextlib.ExitStack() as stack:
-        for _ in range(len(_MITIGATIONS) + 1):
+        for _ in range(attempts):
             try:
                 return _extract(attempt_opts, url, save_cookies_to)
             except Exception as exc:  # noqa: BLE001
@@ -412,9 +419,12 @@ def _extract_with_retries(opts: dict, url: str, on_log, save_cookies_to: Path | 
                     _remember_applied(exc, applied)
                     raise
                 name, message, apply = fix
-                applied.add(name)
+                applied[name] = applied.get(name, 0) + 1
                 if on_log:
-                    on_log(message)
+                    total = _MITIGATION_LIMITS.get(name, 1)
+                    suffix = (f" (попытка {applied[name]} из {total})"
+                              if total > 1 else "")
+                    on_log(message + suffix)
                 apply(attempt_opts, stack)
         raise RuntimeError("Не удалось скачать: перебраны все обходные пути.")
 
@@ -451,9 +461,12 @@ def _warn_if_proxy_dead(proxy: Optional[str], on_log) -> None:
            "Заблокированные сайты без него не откроются.")
 
 
-def _remember_applied(exc: Exception, applied: set) -> None:
+def _remember_applied(exc: Exception, applied) -> None:
     try:
         exc._clipper_applied = tuple(sorted(applied))   # noqa: SLF001
+        # Отдельно счётчики: сообщению важно не только «докачивали»,
+        # но и сколько раз — это разница между сбоем и безнадёжным каналом.
+        exc._clipper_attempts = dict(applied) if isinstance(applied, dict) else {}   # noqa: SLF001
     except Exception:  # noqa: BLE001 — на исключение не всегда можно писать
         pass
 
@@ -488,6 +501,38 @@ def _fix_pot(opts: dict, stack) -> None:        # noqa: ARG001
 
 def _fix_check_formats(opts: dict, stack) -> None:  # noqa: ARG001
     opts["check_formats"] = "selected"
+
+
+# Сколько раз подряд пробуем продолжить оборванную загрузку и сколько ждём
+# перед повтором: канал после разрыва приходит в себя не мгновенно.
+RESUME_ATTEMPTS = 6
+RESUME_PAUSE = 3.0
+
+
+def _fix_resume(opts: dict, stack) -> None:      # noqa: ARG001
+    """Связь оборвалась — повторяем: yt-dlp продолжит с недокачанного места.
+
+    Со второго раза переходим в щадящий режим: мелкие куски и одно соединение.
+    На рвущемся канале крупный кусок чаще не доезжает целиком, и каждый обрыв
+    отбрасывает загрузку назад сильнее.
+    """
+    attempt = opts.get("_resume_attempt", 0) + 1
+    opts["_resume_attempt"] = attempt
+    opts["continuedl"] = True                    # докачка, а не файл заново
+    if attempt >= 2:
+        opts["http_chunk_size"] = 1024 * 1024
+        opts["concurrent_fragment_downloads"] = 1
+    time.sleep(RESUME_PAUSE)
+
+
+def _looks_like_connection_drop(exc: Exception) -> bool:
+    """Соединение оборвалось на полпути — сайт тут ни при чём.
+
+    Так выглядят и разрыв VPN, и обрыв Wi-Fi, и сброс со стороны CDN:
+    WinError 10054, таймаут TLS-рукопожатия, EOF посреди чтения.
+    """
+    low = str(exc).lower()
+    return any(hint in low for hint in _CONNECTION_DROP_HINTS)
 
 
 @functools.lru_cache(maxsize=1)
@@ -553,6 +598,10 @@ _MITIGATIONS = (
      _fix_proxy, lambda exc, url: _looks_like_dead_proxy(exc)),
     ("ipv4", "Таймаут соединения — повторяю по IPv4…",
      _fix_ipv4, lambda exc, url: _looks_like_network_timeout(exc)),
+    # Идёт после ipv4: тот пробуется один раз и дёшево, а докачка — это цикл
+    # на несколько минут, уходить в него имеет смысл, когда быстрое не помогло.
+    ("resume", "Связь оборвалась — продолжаю с недокачанного места…",
+     _fix_resume, lambda exc, url: _looks_like_connection_drop(exc)),
     ("plain_tls", "Сайт заблокировал запрос — пробую как обычный браузер…",
      _fix_plain_tls, lambda exc, url: _looks_like_bot_wall(exc) or (
          "403" in str(exc).lower() and "tiktok.com" in url.lower())),
@@ -584,10 +633,16 @@ def _is_bot_check(exc: Exception) -> bool:
     return "not a bot" in low or "sign in to confirm" in low
 
 
-def _pick_mitigation(exc: Exception, url: str, applied: set):
-    """Первая подходящая мера, которую ещё не применяли."""
+# Сколько раз позволено применить меру. Смена браузера или клиента повторов
+# не требует, а докачку после обрыва повторяем, пока файл не доедет.
+_MITIGATION_LIMITS = {"resume": RESUME_ATTEMPTS}
+
+
+def _pick_mitigation(exc: Exception, url: str, applied):
+    """Первая подходящая мера, у которой ещё не исчерпаны попытки."""
     for name, message, apply, matches in _MITIGATIONS:
-        if name not in applied and matches(exc, url):
+        used = applied.get(name, 0) if isinstance(applied, dict) else int(name in applied)
+        if used < _MITIGATION_LIMITS.get(name, 1) and matches(exc, url):
             return name, message, apply
     return None
 
@@ -638,6 +693,18 @@ def _extract(opts: dict, url: str, save_cookies_to: Path | None = None) -> dict:
 
 
 _TIMEOUT_HINTS = ("timed out", "timeout", "connection reset", "handshake operation")
+
+# Обрыв уже установленного соединения: канал упал, а не сайт отказал.
+_CONNECTION_DROP_HINTS = (
+    "10054",                                  # WinError: хост разорвал подключение
+    "connection reset",
+    "connection aborted",
+    "unexpected_eof_while_reading",
+    "handshake operation timed out",
+    "remote end closed connection",
+    "incomplete read",
+    "content too short",
+)
 
 # Классика: в Windows остался включён прокси от выключенного VPN-клиента.
 # Слова вроде «proxy» тут быть не должно: сайты сами пишут про VPN/proxy в
@@ -765,6 +832,33 @@ def _friendly_error(exc: Exception, url: str, tried: list | None = None) -> Exce
             "Исходная ошибка:",
             text,
         ])))
+    if _looks_like_connection_drop(exc):
+        lines = [
+            "Связь обрывается на середине загрузки.",
+            "",
+            "Файл никуда не делся: недокачанное сохранено, и повторное нажатие "
+            "«Скачать» продолжит с того же места, а не начнёт заново.",
+            "",
+        ]
+        resumed = getattr(exc, "_clipper_attempts", {}).get("resume", 0)
+        if resumed:
+            lines += [
+                f"Программа уже продолжала загрузку {resumed} раз(а) и всё равно "
+                "упёрлась — значит канал рвётся слишком часто.",
+                "",
+            ]
+        lines += [
+            "Что помогает на длинных роликах:",
+            "1. Нажать «Скачать» ещё раз — за пару заходов файл обычно доезжает.",
+            "2. Переключить VPN на другой сервер или выключить его: разрывы чаще",
+            "   всего идут именно от него.",
+            "3. Проводной интернет вместо Wi-Fi, если он есть.",
+            "4. Взять качество пониже — файл меньше, шансов доехать больше.",
+            "",
+            "Исходная ошибка:",
+            text,
+        ]
+        return _mark(RuntimeError(chr(10).join(lines)))
     if _looks_like_bot_wall(exc) or ("403" in low and "tiktok" in low):
         lines = [
             "Сайт не пустил программу: сработала защита от автоматических запросов.",
