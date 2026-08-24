@@ -112,6 +112,79 @@ def find_url(text: str) -> Optional[str]:
     return m.group(0).rstrip(".,;)") if m else None
 
 
+# Are.na — не видеохостинг, а доска ссылок: yt-dlp такие адреса не понимает.
+# Зато у сайта есть открытое API, из которого видно, что лежит в блоке:
+# либо ссылка на YouTube/Vimeo, либо загруженный файл.
+ARENA_BLOCK_RE = re.compile(r"are\.na/block[s]?/(\d+)", re.IGNORECASE)
+ARENA_API = "https://api.are.na/v2/blocks/{block}"
+IFRAME_SRC_RE = re.compile(r'<iframe[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def _fetch_json(url: str, proxy: Optional[str] = None, timeout: int = 20) -> dict:
+    import json
+
+    request = urllib.request.Request(url, headers={
+        "User-Agent": BROWSER_UA,
+        "Accept": "application/json",
+    })
+    if proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    else:
+        opener = urllib.request.build_opener()
+    with opener.open(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8", "replace"))
+
+
+def resolve_arena(url: str, proxy: Optional[str] = None,
+                  timeout: int = 20) -> Optional[str]:
+    """Настоящий адрес видео из блока Are.na, или None.
+
+    Блок бывает трёх видов: встроенное чужое видео (в source лежит ссылка на
+    YouTube или Vimeo), загруженный файл (attachment) и просто картинка —
+    последнюю скачивать нечем.
+    """
+    match = ARENA_BLOCK_RE.search(url or "")
+    if not match:
+        return None
+    data = _fetch_json(ARENA_API.format(block=match.group(1)), proxy, timeout)
+
+    attachment = data.get("attachment") or {}
+    content_type = str(attachment.get("content_type") or "")
+    if attachment.get("url") and content_type.startswith(("video/", "audio/")):
+        return str(attachment["url"])
+
+    source_url = str((data.get("source") or {}).get("url") or "")
+    if source_url.startswith("http"):
+        return source_url
+
+    embed_html = str((data.get("embed") or {}).get("html") or "")
+    frame = IFRAME_SRC_RE.search(embed_html)
+    if frame:
+        src = frame.group(1)
+        return src if src.startswith("http") else "https:" + src
+    return None
+
+
+def resolve_url(url: str, proxy: Optional[str] = None, on_log=None) -> str:
+    """Подменяем адрес там, где сайт сам видео не отдаёт, а только ссылается."""
+    if not ARENA_BLOCK_RE.search(url or ""):
+        return url
+    try:
+        target = resolve_arena(url, proxy)
+    except Exception as exc:  # noqa: BLE001 — не смогли, качаем как было
+        if on_log:
+            on_log(f"Are.na: не удалось узнать исходную ссылку ({exc}).")
+        return url
+    if not target:
+        if on_log:
+            on_log("Are.na: в этом блоке нет видео — только картинка или текст.")
+        return url
+    if on_log:
+        on_log(f"Are.na: качаю исходник — {target}")
+    return target
+
+
 class DownloadCancelled(RuntimeError):
     pass
 
@@ -167,6 +240,9 @@ def download(
         ) from exc
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Доска ссылок вместо видеохостинга: подменяем адрес до первой попытки,
+    # иначе yt-dlp честно ответит «Unsupported URL».
+    url = resolve_url(url, proxy, on_log)
 
     def hook(d: dict) -> None:
         if should_cancel and should_cancel():
@@ -301,6 +377,7 @@ def _extract_trying_cookies(opts: dict, url: str, sources: list, auto: bool,
     # Итоговое сообщение строим по исходной причине («нужен логин»), а не по
     # технической ошибке последнего браузера — иначе она сбивает с толку.
     login_exc: Exception | None = None
+    primary_exc: Exception | None = None   # первая ошибка не про cookies
     last_exc: Exception | None = None
     tried: list = []
 
@@ -317,11 +394,13 @@ def _extract_trying_cookies(opts: dict, url: str, sources: list, auto: bool,
             last_exc = exc
             if _cookies_may_help(exc):
                 login_exc = exc
+            elif primary_exc is None and not _cookies_unreadable(exc):
+                primary_exc = exc
             if label:
                 tried.append(f"{label}: {_cookie_failure_reason(exc, label, notes)}")
 
     if not auto:
-        final = login_exc or last_exc
+        final = login_exc or primary_exc or last_exc
         raise _friendly_error(final, url, tried) from final
 
     # Сайт требует логин, а конкретный источник не задан — ищем сами.
@@ -348,8 +427,12 @@ def _extract_trying_cookies(opts: dict, url: str, sources: list, auto: bool,
             last_exc = exc
             if _cookies_may_help(exc):
                 login_exc = exc
+            elif primary_exc is None and not _cookies_unreadable(exc):
+                primary_exc = exc
 
-    final = login_exc or last_exc
+    # Ошибка чтения cookies — про наш компьютер, а не про сайт: показывать её
+    # вместо настоящей причины значит уводить в сторону.
+    final = login_exc or primary_exc or last_exc
     raise _friendly_error(final, url, tried) from final
 
 
@@ -358,8 +441,15 @@ def _cookies_unreadable(exc: Exception) -> bool:
     if isinstance(exc, (PermissionError, FileNotFoundError)):
         return True
     low = str(exc).lower()
+    if "unsupported url" in low:
+        # Сайт не поддерживается — cookies тут ни при чём. Раньше слово
+        # «unsupported» попадало в признаки нечитаемых cookies, и программа
+        # уходила перебирать браузеры, показывая в конце ошибку доступа
+        # к Safari вместо настоящей причины.
+        return False
     return any(hint in low for hint in (
-        "could not copy", "failed to decrypt", "could not find", "unsupported",
+        "could not copy", "failed to decrypt", "could not find",
+        "unsupported cookie", "unsupported browser",
         # macOS закрывает cookies Safari до выдачи полного доступа к диску,
         # а Windows — базу запущенного браузера.
         "operation not permitted", "errno 1", "permission denied", "access is denied"))
@@ -782,6 +872,12 @@ _LOGIN_HINTS = (
 )
 
 
+def _looks_like_unsupported(exc: Exception) -> bool:
+    """yt-dlp не знает такой сайт и не нашёл видео на странице."""
+    low = str(exc).lower()
+    return "unsupported url" in low or "no video formats found" in low
+
+
 def _looks_like_not_found(exc: Exception) -> bool:
     low = str(exc).lower()
     return "404" in low and "not found" in low
@@ -832,6 +928,26 @@ def _friendly_error(exc: Exception, url: str, tried: list | None = None) -> Exce
             "Исходная ошибка:",
             text,
         ])))
+    if _looks_like_unsupported(exc):
+        lines = [
+            "На этой странице не нашлось видео, которое можно скачать.",
+            "",
+            "Так бывает с сайтами-досками вроде Are.na, Notion или Pinterest: "
+            "сама страница видео не хранит, а только ссылается на него или "
+            "показывает картинку.",
+            "",
+            "Что сделать:",
+            "1. Открыть страницу и найти, откуда взято видео — обычно это",
+            "   YouTube или Vimeo. Ссылку на первоисточник программа скачает.",
+            "2. Если видео залито на сам сайт, скопируйте прямую ссылку на файл:",
+            "   правый клик по видео → «Копировать адрес видео».",
+            "3. Проверить, что по ссылке действительно видео, а не картинка",
+            "   или текстовая заметка.",
+            "",
+            "Исходная ошибка:",
+            text,
+        ]
+        return _mark(RuntimeError(chr(10).join(lines)))
     if _looks_like_connection_drop(exc):
         lines = [
             "Связь обрывается на середине загрузки.",
