@@ -198,23 +198,32 @@ class DownloadResult:
 
 
 def _quality(limit: str = "") -> str:
-    """Цепочка запасных вариантов: H.264+AAC → любой mp4 → вообще что-нибудь.
+    """Лучшее видео и лучший звук, с потолком по высоте кадра.
 
-    H.264 нужен не из вредности: встроенный проигрыватель Windows не умеет
-    AV1 и VP9, а рендер из H.264 идёт без лишнего перекодирования.
+    Последние две ступени — на случай, когда под потолок не подходит ни один
+    формат: у сайта может не быть ни низкого разрешения, ни готового файла
+    с видео и звуком вместе, и тогда лучше скачать что есть, чем ничего.
     """
     height = f"[height<={limit}]" if limit else ""
-    return (
-        f"bestvideo[vcodec^=avc1]{height}+bestaudio[acodec^=mp4a]/"
-        f"bestvideo[vcodec^=avc1]{height}+bestaudio/"
-        f"best[vcodec^=avc1]{height}/"
-        f"bestvideo{height}+bestaudio/"
-        f"best{height}/best"
-    )
+    return (f"bestvideo{height}+bestaudio/best{height}/"
+            f"bestvideo+bestaudio/best")
+
+
+# Порядок предпочтений: сначала разрешение и плавность, и только среди равных —
+# H.264. Раньше кодек стоял первым условием прямо в селекторе, а H.264 на
+# YouTube есть лишь до 1080p — из-за этого «Максимальное» упиралось в 1080p и
+# никогда не брало 1440p и 4K, которые отдаются в VP9 и AV1.
+# vext:mp4 стоит перед кодеком не случайно: «vcodec:h264» поднимает H.264 на
+# первое место, а все прочие кодеки уравнивает, и тогда среди 4K решает битрейт
+# — побеждает VP9, из-за которого файл уезжает в mkv. С предпочтением mp4
+# на 4K берётся AV1 (тоже mp4), а на 1080p по-прежнему H.264.
+FORMAT_SORT = ["res", "fps", "vext:mp4", "vcodec:h264", "acodec:aac"]
 
 
 QUALITY_FORMATS = {
     "Максимальное": _quality(),
+    "2160p": _quality("2160"),
+    "1440p": _quality("1440"),
     "1080p": _quality("1080"),
     "720p": _quality("720"),
     "480p": _quality("480"),
@@ -260,7 +269,10 @@ def download(
     opts: dict = {
         "outtmpl": str(out_dir / "%(title).80B [%(id)s].%(ext)s"),
         "format": QUALITY_FORMATS.get(quality, QUALITY_FORMATS["Максимальное"]),
-        "merge_output_format": "mp4",
+        "format_sort": FORMAT_SORT,
+        # 4K и 1440p приходят в VP9 или AV1: VP9 в mp4 кладут не все сборки
+        # ffmpeg, поэтому вторым вариантом даём mkv — файл соберётся всегда.
+        "merge_output_format": "mp4/mkv",
         "noplaylist": True,
         "restrictfilenames": True,
         # Только на Windows: на macOS этот режим ломает пути — разделители
