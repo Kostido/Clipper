@@ -61,6 +61,7 @@ jobs:
           python tools/test_arena.py
           python tools/test_quality.py
           python tools/test_gpu.py
+          python tools/test_restart_env.py
 
       - name: Сборка exe
         run: pyinstaller --noconfirm Clipper.spec

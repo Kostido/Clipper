@@ -58,7 +58,8 @@ print("заголовок окна:", win.windowTitle())
 print("кнопка загрузки:", win.download_btn.text(), "| рендер:", win.export_btn.text())
 print("метки:", win.range_label.text(), "|", win.play_btn.toolTip())
 print("качество:", [win.quality_combo.itemText(i) for i in range(win.quality_combo.count())])
-print("битрейт:", [win.bitrate_combo.itemText(i) for i in range(3)])
+print("битрейт:", win.bitrate_spin.value(), win.bitrate_unit.text(),
+      "| ноль:", win.bitrate_spin.specialValueText())
 
 if leftovers:
     print("НЕ ПЕРЕВЕДЕНО:")

@@ -17,7 +17,7 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QDoubleSpinBox, QProgressBar, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from . import __version__, downloader, ffmpeg_tools, storage, updater
@@ -41,10 +41,8 @@ RESOLUTIONS = [(tr("Как в исходнике"), 0), ("2160p", 2160), ("1440p
 FPS_CHOICES = [(tr("Как в исходнике"), 0.0), ("60", 60.0), ("50", 50.0),
                ("30", 30.0), ("25", 25.0), ("24", 24.0)]
 # Битрейт понятнее, чем CRF: прямо задаёт размер файла и качество картинки.
-BITRATES = [(tr("Авто (по разрешению)"), 0), (tr("1,5 Мбит/с — экономно"), 1500),
-            (tr("3 Мбит/с"), 3000), (tr("5 Мбит/с — обычный"), 5000),
-            (tr("8 Мбит/с — высокий"), 8000), (tr("12 Мбит/с"), 12000),
-            (tr("20 Мбит/с — максимум"), 20000)]
+# Потолок берём из общего ограничения, чтобы поле и разбор строки не разошлись.
+BITRATE_MAX_MBIT = ffmpeg_tools.BITRATE_MAX / 1000
 # Что получаем на выходе: подпись для списка и ключ формата.
 OUTPUT_FORMATS = [(tr("MP4 · H.264"), ffmpeg_tools.FORMAT_MP4),
                   (tr("WebM · VP9"), ffmpeg_tools.FORMAT_WEBM),
@@ -83,16 +81,17 @@ QLabel#section {{ color: {MUTED}; font-size: 11px; font-weight: 600; }}
 QLabel#hint {{ color: {MUTED}; }}
 QLabel#mono {{ font-family: Consolas, monospace; color: {MUTED}; }}
 
-QLineEdit, QComboBox, QSpinBox {{
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
     background: {FIELD};
     border: 1px solid {LINE};
     border-radius: 10px;
     padding: 8px 12px;
     min-height: 20px;
 }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color: {ACCENT}; }}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {ACCENT}; }}
 QLineEdit#url {{ font-size: 14px; padding: 11px 14px; }}
-QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{ color: #5a6274; }}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled,
+QDoubleSpinBox:disabled {{ color: #5a6274; }}
 
 QPushButton {{
     background: #1c2130;
@@ -372,7 +371,8 @@ class MainWindow(QMainWindow):
             return super().eventFilter(obj, event)
         focused = QApplication.focusWidget()
         # В поле ввода клавиши принадлежат тексту, а не плееру.
-        if isinstance(focused, (QLineEdit, QPlainTextEdit, QSpinBox, QComboBox)):
+        if isinstance(focused, (QLineEdit, QPlainTextEdit, QSpinBox,
+                                QDoubleSpinBox, QComboBox)):
             return super().eventFilter(obj, event)
         modifiers = event.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier
                                          | Qt.AltModifier | Qt.MetaModifier)
@@ -673,19 +673,25 @@ class MainWindow(QMainWindow):
         self.format_combo.currentIndexChanged.connect(self._on_format_changed)
         row.addWidget(self.format_combo)
 
-        self.bitrate_combo = QComboBox()
-        for label, _ in BITRATES:
-            self.bitrate_combo.addItem(label)
-        self.bitrate_combo.setCurrentIndex(3)
-        self.bitrate_combo.setFixedWidth(210)
-        # Список — это подсказки, а не ограничение: значение можно вписать руками.
-        self.bitrate_combo.setEditable(True)
-        self.bitrate_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.bitrate_combo.setToolTip(
+        # В поле только число: единица измерения стоит рядом отдельной подписью,
+        # чтобы её нельзя было стереть вместе со значением.
+        self.bitrate_spin = QDoubleSpinBox()
+        self.bitrate_spin.setRange(0.0, BITRATE_MAX_MBIT)
+        self.bitrate_spin.setDecimals(1)
+        self.bitrate_spin.setSingleStep(0.5)
+        self.bitrate_spin.setValue(5.0)
+        self.bitrate_spin.setFixedWidth(88)
+        self.bitrate_spin.setSpecialValueText(tr("Авто"))   # ноль — подобрать самим
+        self.bitrate_spin.setToolTip(
             "Сколько данных в секунду. Больше — чётче картинка и тяжелее файл: "
             "минута при 5 Мбит/с весит примерно 38 МБ.\n"
-            "Своё значение можно вписать: «6», «6,5 Мбит/с», «6000k».")
-        row.addWidget(self.bitrate_combo)
+            "Ноль — подобрать по разрешению. Обычные значения: 3 — экономно, "
+            "5 — как правило хватает, 8 и выше — для динамичной съёмки.")
+        row.addWidget(self.bitrate_spin)
+
+        self.bitrate_unit = self._label(tr("Мбит/с"), "hint")
+        self.bitrate_unit.setToolTip(self.bitrate_spin.toolTip())
+        row.addWidget(self.bitrate_unit)
 
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(PRESETS)
@@ -811,12 +817,14 @@ class MainWindow(QMainWindow):
         self.quality_combo.setCurrentText(
             self.settings.value("quality", tr("Максимальное"), type=str)
         )
-        saved_bitrate = self.settings.value("bitrate", "", type=str)
-        if saved_bitrate:
-            self.bitrate_combo.setCurrentText(saved_bitrate)
+        saved_mbit = self.settings.value("bitrate_mbit", None)
+        if saved_mbit is not None:
+            self.bitrate_spin.setValue(float(saved_mbit))
         else:
-            self.bitrate_combo.setCurrentIndex(
-                int(self.settings.value("bitrate_index", 3)))
+            # Настройка из прошлых версий хранилась строкой вида «6,5 Мбит/с».
+            old_text = self.settings.value("bitrate", "", type=str)
+            kbit = ffmpeg_tools.parse_bitrate(old_text) if old_text else 0
+            self.bitrate_spin.setValue(kbit / 1000 if kbit else 5.0)
         self.preset_combo.setCurrentText(self.settings.value("preset", "medium", type=str))
         index = self.browser_combo.findData(
             self.settings.value("browser", downloader.BROWSER_AUTO, type=str))
@@ -845,7 +853,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt API
         self.settings.setValue("download_dir", self.dir_edit.text())
         self.settings.setValue("quality", self.quality_combo.currentData())
-        self.settings.setValue("bitrate", self.bitrate_combo.currentText())
+        self.settings.setValue("bitrate_mbit", self.bitrate_spin.value())
         self.settings.setValue("preset", self.preset_combo.currentText())
         self.settings.setValue("browser", self.browser_combo.currentData())
         self.settings.setValue("proxy", self.proxy_edit.text().strip())
@@ -1421,13 +1429,14 @@ class MainWindow(QMainWindow):
 
         # У звука нет ни разрешения, ни кадров, ни лупа — такие настройки
         # прячем целиком: выключенное, но видимое поле только путает.
-        for widget in (self.bitrate_combo, self.res_combo, self.fps_combo,
-                       self.copy_check, self.mute_check, self.loop_check):
+        for widget in (self.bitrate_spin, self.bitrate_unit, self.res_combo,
+                       self.fps_combo, self.copy_check, self.mute_check,
+                       self.loop_check):
             widget.setVisible(not audio_only)
         self.preset_combo.setVisible(self.output_format() == ffmpeg_tools.FORMAT_MP4)
         self.audio_combo.setVisible(audio_only or not self.mute_check.isChecked())
 
-        for widget in (self.bitrate_combo, self.preset_combo, self.res_combo, self.fps_combo):
+        for widget in (self.bitrate_spin, self.preset_combo, self.res_combo, self.fps_combo):
             widget.setEnabled(video_settings)
         # preset — настройка процессорного кодировщика, видеокарта его не читает.
         self.preset_combo.setEnabled(video_settings and not self._gpu_enabled())
@@ -1435,20 +1444,8 @@ class MainWindow(QMainWindow):
         self.mute_check.setEnabled(not self.loop_check.isChecked())
 
     def _chosen_bitrate(self) -> int:
-        """Битрейт в кбит/с из списка или из вписанного вручную значения.
-
-        Ноль означает «подобрать по разрешению»; на нечитаемый ввод падать
-        незачем — берём авто, но говорим об этом вслух.
-        """
-        text = self.bitrate_combo.currentText().strip()
-        kbit = ffmpeg_tools.parse_bitrate(text)
-        auto = text == "" or text == BITRATES[0][0]
-        if not kbit and not auto:
-            self.log(tr("Битрейт «{text}» непонятен — беру авто по разрешению "
-                        "(допустимо от {low} до {high} кбит/с).").format(
-                            text=text, low=ffmpeg_tools.BITRATE_MIN,
-                            high=ffmpeg_tools.BITRATE_MAX))
-        return kbit
+        """Битрейт в кбит/с; ноль означает «подобрать по разрешению»."""
+        return int(round(self.bitrate_spin.value() * 1000))
 
     def _gpu_enabled(self) -> bool:
         """Ускорение включают только для H.264: у VP9 и MP3 его нет."""

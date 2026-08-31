@@ -116,16 +116,14 @@ EN = {
     # --- рендер ---
     "H.264": "H.264",
     "Сколько данных в секунду. Больше — чётче картинка и тяжелее файл: "
-    "минута при 5 Мбит/с весит примерно 38 МБ.":
+    "минута при 5 Мбит/с весит примерно 38 МБ.\n"
+    "Ноль — подобрать по разрешению. Обычные значения: 3 — экономно, "
+    "5 — как правило хватает, 8 и выше — для динамичной съёмки.":
         "Data per second. Higher means a sharper picture and a bigger file: "
-        "a minute at 5 Mbps is about 38 MB.",
-    "Авто (по разрешению)": "Auto (by resolution)",
-    "1,5 Мбит/с — экономно": "1.5 Mbps — light",
-    "3 Мбит/с": "3 Mbps",
-    "5 Мбит/с — обычный": "5 Mbps — standard",
-    "8 Мбит/с — высокий": "8 Mbps — high",
-    "12 Мбит/с": "12 Mbps",
-    "20 Мбит/с — максимум": "20 Mbps — maximum",
+        "a minute at 5 Mbps is about 38 MB.\n"
+        "Zero picks a rate by resolution. Typical values: 3 is light, "
+        "5 is usually enough, 8 and up for fast-moving footage.",
+    "Мбит/с": "Mbps",
     "Скорость кодирования (preset)": "Encoding speed (preset)",
     "Разрешение результата": "Output resolution",
     "Кадры в секунду": "Frames per second",
@@ -185,12 +183,6 @@ EN = {
         "the picture is a little rougher than on the CPU — for final quality, "
         "clear this box.",
     "Ускорение рендера: {label}": "Render acceleration: {label}",
-    "Своё значение можно вписать: «6», «6,5 Мбит/с», «6000k».":
-        "You can type your own: “6”, “6.5 Mbps”, “6000k”.",
-    "Битрейт «{text}» непонятен — беру авто по разрешению "
-    "(допустимо от {low} до {high} кбит/с).":
-        "Bitrate “{text}” is not understood — falling back to auto "
-        "(allowed range {low} to {high} kbps).",
     "Файл cookies (Netscape cookies.txt)": "Cookie file (Netscape cookies.txt)",
     "cookies.txt (*.txt);;Все файлы (*)": "cookies.txt (*.txt);;All files (*)",
     "Файл cookies отключён.": "Cookie file disabled.",

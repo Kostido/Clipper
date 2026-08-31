@@ -83,8 +83,37 @@ def install_to_applications() -> Path:
     return target
 
 
+# Переменные, которыми загрузчик PyInstaller помечает свои процессы.
+_PYI_ENV_PREFIX = "_PYI_"
+_PYI_ENV_EXTRA = ("_MEIPASS2", "_MEIPASS")
+_LIBRARY_PATH_VARS = ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH")
+
+
+def child_env() -> dict:
+    """Окружение для запуска обновлённой программы — без следов PyInstaller.
+
+    Загрузчик передаёт дочерним процессам служебные переменные и при старте
+    сверяет их с родителем. После обновления родитель — уже другой файл, и
+    новый экземпляр падает с «Security validation failure: parent process has
+    different executable». Поэтому запускаем его с чистым окружением.
+    """
+    env = dict(os.environ)
+    for key in list(env):
+        if key.startswith(_PYI_ENV_PREFIX) or key in _PYI_ENV_EXTRA:
+            env.pop(key, None)
+    # Пути к библиотекам загрузчик подменяет своими; возвращаем те, что были
+    # в системе до запуска — иначе новый процесс потянет чужие библиотеки.
+    for var in _LIBRARY_PATH_VARS:
+        original = env.pop(var + "_ORIG", None)
+        if original is not None:
+            env[var] = original
+        elif is_frozen():
+            env.pop(var, None)
+    return env
+
+
 def launch(bundle: Path) -> None:
-    subprocess.Popen(["open", "-n", str(bundle)], close_fds=True)
+    subprocess.Popen(["open", "-n", str(bundle)], close_fds=True, env=child_env())
 
 
 def can_self_update() -> bool:
@@ -335,9 +364,9 @@ def restart() -> None:
     bundle = macos_bundle()
     if bundle:
         # open запускает новый экземпляр уже обновлённого бандла.
-        subprocess.Popen(["open", "-n", str(bundle)], close_fds=True)
+        subprocess.Popen(["open", "-n", str(bundle)], close_fds=True, env=child_env())
         return
-    subprocess.Popen([str(current_exe())], close_fds=True,
+    subprocess.Popen([str(current_exe())], close_fds=True, env=child_env(),
                      creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
 
 
