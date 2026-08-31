@@ -4,7 +4,7 @@
 машине может не быть. Поэтому кодировщик проверяется пробным запуском, а если
 он всё-таки отвалится посреди рендера — работа доводится на процессоре.
 """
-import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -49,10 +49,15 @@ for encoder in ("h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"):
 # 5) в команде экспорта появляется именно аппаратный кодировщик
 sandbox = Path(tempfile.mkdtemp(prefix="clipper_gpu_"))
 src = sandbox / "src.mp4"
-os.system(f'"{ffmpeg}" -y -hide_banner -loglevel error -f lavfi '
-          f'-i testsrc=size=320x240:rate=25:duration=4 -f lavfi '
-          f'-i sine=frequency=440:duration=4 -c:v libx264 -pix_fmt yuv420p '
-          f'-c:a aac -shortest "{src}"')
+# Списком аргументов, а не строкой: на Windows путь к ffmpeg лежит в папке
+# с пробелами, и командная строка через os.system там разваливается.
+subprocess.run(
+    [str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+     "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=4",
+     "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(src)],
+    check=True,
+)
 assert src.exists(), "не удалось подготовить тестовое видео"
 
 cmd = ft.build_export_command(src, sandbox / "gpu.mp4",
