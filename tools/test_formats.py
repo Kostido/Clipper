@@ -98,4 +98,38 @@ cmd = ft.build_export_command(src, sandbox / "copy.mp4",
                               ft.ExportSettings(1, 4, copy_mode=True, mute=True))
 assert "-an" in cmd and "copy" in cmd, "в режиме копирования звук не убирается"
 
-print("OK: MP4, WebM с лупом и MP3 собираются, звук отключается где просили")
+# 9) галочка «Без звука» не должна залипать после лупа: иначе следующие
+#    рендеры молча выходят немыми, и это выглядит как «WebM без звука»
+import os as _os
+
+_os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PySide6.QtCore import QSettings                     # noqa: E402
+from PySide6.QtWidgets import QApplication               # noqa: E402
+from PySide6.QtTest import QTest                         # noqa: E402
+import clipper.app as app_mod                            # noqa: E402
+
+QSettings("Clipper", "Clipper").remove("mute")
+qt_app = QApplication.instance() or QApplication([])
+app_mod._apply_theme(qt_app)
+win = app_mod.MainWindow()
+win.format_combo.setCurrentIndex(1)                      # WebM
+win.loop_check.setChecked(True)
+QTest.qWait(30)
+assert win.mute_check.isChecked(), "луп обязан выключать звук"
+win.loop_check.setChecked(False)
+QTest.qWait(30)
+print(f"6) после снятия лупа «Без звука» = {win.mute_check.isChecked()}")
+assert not win.mute_check.isChecked(), \
+    "звук не вернулся — следующие рендеры выйдут немыми"
+
+win.mute_check.setChecked(True)                          # выключил сам пользователь
+win.loop_check.setChecked(True)
+win.loop_check.setChecked(False)
+QTest.qWait(30)
+assert win.mute_check.isChecked(), "луп перевернул выбор пользователя"
+win.settings.remove("mute")
+win.settings.remove("loop")
+win.close()
+
+print("OK: MP4, WebM с лупом и MP3 собираются, звук отключается где просили "
+      "и возвращается после лупа")

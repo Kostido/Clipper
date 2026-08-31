@@ -124,6 +124,9 @@ EN = {
         "Zero picks a rate by resolution. Typical values: 3 is light, "
         "5 is usually enough, 8 and up for fast-moving footage.",
     "Мбит/с": "Mbps",
+    "Рендер без звука ({reason}).": "Rendering without audio ({reason}).",
+    "зациклено": "looped",
+    "снята галочка «Без звука»": "the “No audio” box is ticked",
     "Скорость кодирования (preset)": "Encoding speed (preset)",
     "Разрешение результата": "Output resolution",
     "Кадры в секунду": "Frames per second",

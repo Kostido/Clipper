@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
         self.source: Path | None = None
         self.info: ffmpeg_tools.MediaInfo | None = None
         self.export_dir: Path | None = None   # куда сохраняли фрагмент в прошлый раз
+        self._mute_before_loop = False        # каким «Без звука» был до лупа
         self.hw_encoder = ""                  # найденный аппаратный кодировщик
         self.hw_probe: HwProbe | None = None
         self.download_worker: DownloadWorker | None = None
@@ -1408,9 +1409,14 @@ class MainWindow(QMainWindow):
 
     def _on_loop_toggled(self, checked: bool) -> None:
         # Зацикленное видео идёт без звука — показываем это галочкой, а не
-        # молча выбрасываем дорожку при рендере.
+        # молча выбрасываем дорожку при рендере. Сняли луп — возвращаем звук
+        # таким, каким он был: иначе выключенным он остаётся навсегда, и
+        # следующие рендеры молча выходят немыми.
         if checked:
+            self._mute_before_loop = self.mute_check.isChecked()
             self.mute_check.setChecked(True)
+        else:
+            self.mute_check.setChecked(self._mute_before_loop)
         self._sync_render_controls()
 
     def _on_format_changed(self) -> None:
@@ -1512,6 +1518,9 @@ class MainWindow(QMainWindow):
             loop=self.loop_check.isChecked() and container != ffmpeg_tools.FORMAT_MP3,
             hw_encoder=self.hw_encoder if self._gpu_enabled() else "",
         )
+        if settings.audio_off and container != ffmpeg_tools.FORMAT_MP3:
+            reason = tr("зациклено") if settings.loop else tr("снята галочка «Без звука»")
+            self.log(tr("Рендер без звука ({reason}).").format(reason=reason))
         self.export_progress.setValue(0)
         self.export_progress.setVisible(True)
         self.export_btn.setText(tr("Отменить рендер"))
