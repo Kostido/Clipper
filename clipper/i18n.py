@@ -174,6 +174,23 @@ EN = {
     "Битрейт звука": "Audio bitrate",
     "Без звука": "No audio",
     "Зациклить": "Loop",
+    "GPU": "GPU",
+    "Ищу видеокарту…": "Looking for a GPU…",
+    "Видеокарта с ускорением кодирования не найдена — рендер идёт на процессоре.":
+        "No GPU with encoding support found — rendering runs on the CPU.",
+    "Кодирование на видеокарте ({label}): в разы быстрее. При том же битрейте "
+    "картинка немного грубее, чем на процессоре, — для финального качества "
+    "галочку лучше снять.":
+        "Encoding on the GPU ({label}): several times faster. At the same bitrate "
+        "the picture is a little rougher than on the CPU — for final quality, "
+        "clear this box.",
+    "Ускорение рендера: {label}": "Render acceleration: {label}",
+    "Своё значение можно вписать: «6», «6,5 Мбит/с», «6000k».":
+        "You can type your own: “6”, “6.5 Mbps”, “6000k”.",
+    "Битрейт «{text}» непонятен — беру авто по разрешению "
+    "(допустимо от {low} до {high} кбит/с).":
+        "Bitrate “{text}” is not understood — falling back to auto "
+        "(allowed range {low} to {high} kbps).",
     "Файл cookies (Netscape cookies.txt)": "Cookie file (Netscape cookies.txt)",
     "cookies.txt (*.txt);;Все файлы (*)": "cookies.txt (*.txt);;All files (*)",
     "Файл cookies отключён.": "Cookie file disabled.",

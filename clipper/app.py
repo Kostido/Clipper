@@ -26,7 +26,7 @@ from .i18n import tr
 from .timecode import format_tc
 from .timeline import TimelineWidget, clip_length_text
 from .workers import (DownloadWorker, ExportWorker, PreviewProxyWorker,
-                      UpdateCheckWorker, UpdateDownloadWorker)
+                      HwProbe, UpdateCheckWorker, UpdateDownloadWorker)
 
 # Перемотка во время протяжки: ждём отработки предыдущей, но не дольше
 # SEEK_TIMEOUT — иначе на файле с медленным seek дорожка встанет совсем.
@@ -200,6 +200,8 @@ class MainWindow(QMainWindow):
         self.source: Path | None = None
         self.info: ffmpeg_tools.MediaInfo | None = None
         self.export_dir: Path | None = None   # куда сохраняли фрагмент в прошлый раз
+        self.hw_encoder = ""                  # найденный аппаратный кодировщик
+        self.hw_probe: HwProbe | None = None
         self.download_worker: DownloadWorker | None = None
         self.export_worker: ExportWorker | None = None
         self.update_worker: UpdateCheckWorker | None = None
@@ -228,6 +230,7 @@ class MainWindow(QMainWindow):
                      "в «Программы», иначе обновления ставиться не будут.")
         if self.autoupdate_action.isChecked():
             QTimer.singleShot(1500, lambda: self.check_updates(silent=True))
+        self._probe_hw()
 
     # ---------------------------------------------------------------- UI ----
     def _build_ui(self) -> None:
@@ -675,9 +678,13 @@ class MainWindow(QMainWindow):
             self.bitrate_combo.addItem(label)
         self.bitrate_combo.setCurrentIndex(3)
         self.bitrate_combo.setFixedWidth(210)
+        # Список — это подсказки, а не ограничение: значение можно вписать руками.
+        self.bitrate_combo.setEditable(True)
+        self.bitrate_combo.setInsertPolicy(QComboBox.NoInsert)
         self.bitrate_combo.setToolTip(
             "Сколько данных в секунду. Больше — чётче картинка и тяжелее файл: "
-            "минута при 5 Мбит/с весит примерно 38 МБ.")
+            "минута при 5 Мбит/с весит примерно 38 МБ.\n"
+            "Своё значение можно вписать: «6», «6,5 Мбит/с», «6000k».")
         row.addWidget(self.bitrate_combo)
 
         self.preset_combo = QComboBox()
@@ -700,6 +707,12 @@ class MainWindow(QMainWindow):
         self.fps_combo.setFixedWidth(140)
         self.fps_combo.setToolTip(tr("Кадры в секунду"))
         row.addWidget(self.fps_combo)
+
+        self.gpu_check = QCheckBox(tr("GPU"))
+        self.gpu_check.setEnabled(False)      # включим, когда проверим железо
+        self.gpu_check.setToolTip(tr("Ищу видеокарту…"))
+        self.gpu_check.toggled.connect(lambda _c: self._sync_render_controls())
+        row.addWidget(self.gpu_check)
 
         self.audio_combo = QComboBox()
         self.audio_combo.addItems(AUDIO_BITRATES)
@@ -764,6 +777,33 @@ class MainWindow(QMainWindow):
             self.log(tr("ffmpeg не найден — скачивание в высоком качестве и рендер работать не будут."))
             QMessageBox.warning(self, APP_NAME, str(ffmpeg_tools.FFmpegMissingError()))
 
+    def _probe_hw(self) -> None:
+        """Проверяем железо в фоне: ffmpeg отвечает не мгновенно."""
+        probe = HwProbe(self)
+        probe.ready.connect(self._on_hw_ready)
+        self.hw_probe = probe
+        probe.start()
+
+    def _on_hw_ready(self, encoder: str) -> None:
+        self.hw_encoder = encoder
+        if not encoder:
+            self.gpu_check.setChecked(False)
+            self.gpu_check.setToolTip(
+                tr("Видеокарта с ускорением кодирования не найдена — рендер идёт "
+                   "на процессоре."))
+            self._sync_render_controls()
+            return
+        label = ffmpeg_tools.hw_encoder_label(encoder)
+        self.gpu_check.setEnabled(True)
+        self.gpu_check.setText(tr("GPU"))
+        self.gpu_check.setToolTip(
+            tr("Кодирование на видеокарте ({label}): в разы быстрее. При том же "
+               "битрейте картинка немного грубее, чем на процессоре, — для "
+               "финального качества галочку лучше снять.").format(label=label))
+        self.gpu_check.setChecked(self.settings.value("use_gpu", True, type=bool))
+        self.log(tr("Ускорение рендера: {label}").format(label=label))
+        self._sync_render_controls()
+
     def _restore_settings(self) -> None:
         saved_dir = self.settings.value("download_dir", type=str)
         if saved_dir:
@@ -771,8 +811,12 @@ class MainWindow(QMainWindow):
         self.quality_combo.setCurrentText(
             self.settings.value("quality", tr("Максимальное"), type=str)
         )
-        self.bitrate_combo.setCurrentIndex(
-            int(self.settings.value("bitrate_index", 3)))
+        saved_bitrate = self.settings.value("bitrate", "", type=str)
+        if saved_bitrate:
+            self.bitrate_combo.setCurrentText(saved_bitrate)
+        else:
+            self.bitrate_combo.setCurrentIndex(
+                int(self.settings.value("bitrate_index", 3)))
         self.preset_combo.setCurrentText(self.settings.value("preset", "medium", type=str))
         index = self.browser_combo.findData(
             self.settings.value("browser", downloader.BROWSER_AUTO, type=str))
@@ -801,7 +845,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 — Qt API
         self.settings.setValue("download_dir", self.dir_edit.text())
         self.settings.setValue("quality", self.quality_combo.currentData())
-        self.settings.setValue("bitrate_index", self.bitrate_combo.currentIndex())
+        self.settings.setValue("bitrate", self.bitrate_combo.currentText())
         self.settings.setValue("preset", self.preset_combo.currentText())
         self.settings.setValue("browser", self.browser_combo.currentData())
         self.settings.setValue("proxy", self.proxy_edit.text().strip())
@@ -809,6 +853,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("audio_bitrate", self.audio_combo.currentText())
         self.settings.setValue("mute", self.mute_check.isChecked())
         self.settings.setValue("loop", self.loop_check.isChecked())
+        self.settings.setValue("use_gpu", self.gpu_check.isChecked())
         self.settings.setValue("autoupdate", self.autoupdate_action.isChecked())
         self.settings.setValue(
             "cookies_file", str(self.cookies_file) if self.cookies_file else "")
@@ -1384,7 +1429,31 @@ class MainWindow(QMainWindow):
 
         for widget in (self.bitrate_combo, self.preset_combo, self.res_combo, self.fps_combo):
             widget.setEnabled(video_settings)
+        # preset — настройка процессорного кодировщика, видеокарта его не читает.
+        self.preset_combo.setEnabled(video_settings and not self._gpu_enabled())
+        self.gpu_check.setVisible(self.output_format() == ffmpeg_tools.FORMAT_MP4)
         self.mute_check.setEnabled(not self.loop_check.isChecked())
+
+    def _chosen_bitrate(self) -> int:
+        """Битрейт в кбит/с из списка или из вписанного вручную значения.
+
+        Ноль означает «подобрать по разрешению»; на нечитаемый ввод падать
+        незачем — берём авто, но говорим об этом вслух.
+        """
+        text = self.bitrate_combo.currentText().strip()
+        kbit = ffmpeg_tools.parse_bitrate(text)
+        auto = text == "" or text == BITRATES[0][0]
+        if not kbit and not auto:
+            self.log(tr("Битрейт «{text}» непонятен — беру авто по разрешению "
+                        "(допустимо от {low} до {high} кбит/с).").format(
+                            text=text, low=ffmpeg_tools.BITRATE_MIN,
+                            high=ffmpeg_tools.BITRATE_MAX))
+        return kbit
+
+    def _gpu_enabled(self) -> bool:
+        """Ускорение включают только для H.264: у VP9 и MP3 его нет."""
+        return bool(self.hw_encoder) and self.gpu_check.isChecked() \
+            and self.output_format() == ffmpeg_tools.FORMAT_MP4
 
     def _suggested_export_path(self) -> Path:
         """Куда предложить сохранить: где сохраняли прошлый раз, иначе к загрузкам."""
@@ -1435,7 +1504,7 @@ class MainWindow(QMainWindow):
         settings = ffmpeg_tools.ExportSettings(
             start=start,
             end=end,
-            video_bitrate=BITRATES[self.bitrate_combo.currentIndex()][1],
+            video_bitrate=self._chosen_bitrate(),
             preset=self.preset_combo.currentText(),
             scale_height=RESOLUTIONS[self.res_combo.currentIndex()][1],
             fps=FPS_CHOICES[self.fps_combo.currentIndex()][1],
@@ -1444,6 +1513,7 @@ class MainWindow(QMainWindow):
             audio_bitrate=self.audio_combo.currentText(),
             mute=self.mute_check.isChecked() and container != ffmpeg_tools.FORMAT_MP3,
             loop=self.loop_check.isChecked() and container != ffmpeg_tools.FORMAT_MP3,
+            hw_encoder=self.hw_encoder if self._gpu_enabled() else "",
         )
         self.export_progress.setValue(0)
         self.export_progress.setVisible(True)

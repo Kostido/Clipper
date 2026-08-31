@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+import threading
+
+from PySide6.QtCore import QObject, QThread, Signal
 
 from . import downloader, ffmpeg_tools, updater
 
@@ -151,3 +153,25 @@ class PreviewProxyWorker(QThread):
             self.finished_ok.emit(path)
 
 
+
+
+class HwProbe(QObject):
+    """Ищет аппаратный кодировщик в фоне.
+
+    Проверка запускает ffmpeg и занимает секунды — в интерфейсном потоке это
+    заметная пауза при старте. Берём обычный поток-демон, а не QThread:
+    программа не обязана дожидаться пробы, чтобы закрыться.
+    """
+
+    ready = Signal(str)            # имя кодировщика или пустая строка
+
+    def start(self) -> None:
+        threading.Thread(target=self._probe, daemon=True).start()
+
+    def _probe(self) -> None:
+        try:
+            found = ffmpeg_tools.hw_encoder() or ""
+        except Exception:  # noqa: BLE001 — без ускорения рендерим на процессоре
+            found = ""
+        # Сигнал из чужого потока Qt сам переложит в очередь интерфейса.
+        self.ready.emit(found)

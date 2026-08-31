@@ -1,12 +1,13 @@
 """Поиск ffmpeg/ffprobe и операции обрезки/перекодирования."""
 from __future__ import annotations
 
+import functools
 import json
 import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -179,6 +180,7 @@ class ExportSettings:
     container: str = FORMAT_MP4    # mp4 | webm | mp3
     mute: bool = False             # выбросить звук из результата
     loop: bool = False             # пометить файл как зацикленный
+    hw_encoder: str = ""           # имя аппаратного кодировщика; пусто — на процессоре
 
     @property
     def audio_off(self) -> bool:
@@ -194,6 +196,30 @@ class ExportSettings:
 # Разумный битрейт под высоту кадра — если пользователь не выбрал свой.
 _BITRATE_BY_HEIGHT = ((2160, 24000), (1440, 14000), (1080, 8000),
                       (720, 5000), (480, 2500), (0, 1500))
+
+
+# Ручной ввод битрейта: «6», «6.5 Мбит/с», «6000k», «6000 кбит/с».
+_BITRATE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(k|к|m|м)?", re.IGNORECASE)
+BITRATE_MIN, BITRATE_MAX = 100, 200_000        # кбит/с
+
+
+def parse_bitrate(text: str) -> int:
+    """Введённый вручную битрейт в кбит/с; 0 — если разобрать не вышло.
+
+    Единицу берём из суффикса, а без него — по величине числа: «6» это шесть
+    мегабит, «6000» — шесть тысяч килобит. Никто не задаёт 6 кбит/с видео.
+    """
+    match = _BITRATE_RE.search(str(text or ""))
+    if not match:
+        return 0
+    value = float(match.group(1).replace(",", "."))
+    unit = (match.group(2) or "").lower()
+    if unit in ("m", "м"):
+        value *= 1000
+    elif unit not in ("k", "к") and value < 100:
+        value *= 1000                          # без суффикса маленькое число — мегабиты
+    kbit = int(round(value))
+    return kbit if BITRATE_MIN <= kbit <= BITRATE_MAX else 0
 
 
 def default_bitrate(height: int) -> int:
@@ -244,8 +270,87 @@ def _audio_args(s: ExportSettings, codec: str) -> list[str]:
     return ["-an"] if s.audio_off else ["-c:a", codec, "-b:a", s.audio_bitrate]
 
 
+# Аппаратные кодировщики H.264 по платформам, в порядке предпочтения.
+# Наличие в сборке ffmpeg ещё не значит, что железо на месте, поэтому перед
+# использованием кодировщик проверяется пробным запуском.
+HW_ENCODERS = {
+    "win32": ("h264_nvenc", "h264_qsv", "h264_amf"),
+    "darwin": ("h264_videotoolbox",),
+    "linux": ("h264_nvenc", "h264_qsv"),
+}
+
+
+@functools.lru_cache(maxsize=1)
+def _encoder_names() -> frozenset:
+    binary = ffmpeg_path()
+    if not binary:
+        return frozenset()
+    out = subprocess.run(
+        [str(binary), "-hide_banner", "-encoders"], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", **_popen_kwargs())
+    names = re.findall(r"^\s*[VAS][.A-Z]{5}\s+(\S+)", out.stdout or "", re.MULTILINE)
+    return frozenset(names)
+
+
+def _encoder_works(name: str) -> bool:
+    """Пробуем закодировать один кадр: сборка может знать кодировщик, а
+    видеокарты под него на машине не быть — тогда ffmpeg падает на открытии."""
+    binary = ffmpeg_path()
+    if not binary:
+        return False
+    cmd = [str(binary), "-hide_banner", "-loglevel", "error",
+           "-f", "lavfi", "-i", "color=black:s=320x240:d=0.1",
+           "-frames:v", "1", "-c:v", name, "-f", "null", "-"]
+    try:
+        done = subprocess.run(cmd, capture_output=True, timeout=30, **_popen_kwargs())
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return done.returncode == 0
+
+
+@functools.lru_cache(maxsize=1)
+def hw_encoder() -> Optional[str]:
+    """Первый работающий аппаратный кодировщик H.264, или None."""
+    available = _encoder_names()
+    for name in HW_ENCODERS.get(sys.platform, ()):
+        if name in available and _encoder_works(name):
+            return name
+    return None
+
+
+def hw_encoder_label(name: str) -> str:
+    """Человеческое имя железа — его показываем в журнале."""
+    return {
+        "h264_nvenc": "NVIDIA NVENC",
+        "h264_qsv": "Intel Quick Sync",
+        "h264_amf": "AMD AMF",
+        "h264_videotoolbox": "Apple VideoToolbox",
+    }.get(name, name)
+
+
+def _hw_video_args(encoder: str, bitrate: int) -> list[str]:
+    """Настройки качества у каждого производителя свои, общий только битрейт."""
+    rate = ["-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k",
+            "-bufsize", f"{bitrate * 2}k"]
+    tuning = {
+        # p5 — предпоследняя по качеству предустановка NVENC: заметно лучше
+        # быстрых и всё ещё в разы быстрее процессорного кодирования.
+        "h264_nvenc": ["-preset", "p5", "-rc", "vbr", "-profile:v", "high"],
+        "h264_qsv": ["-preset", "slow", "-profile:v", "high"],
+        "h264_amf": ["-quality", "balanced", "-profile:v", "high"],
+        # allow_sw разрешает откат на процессор, если видеодвижок занят.
+        "h264_videotoolbox": ["-profile:v", "high", "-allow_sw", "1"],
+    }.get(encoder, [])
+    return ["-c:v", encoder] + rate + tuning + ["-pix_fmt", "yuv420p"]
+
+
 def _mp4_args(src: Path, s: ExportSettings) -> list[str]:
     bitrate = s.video_bitrate or default_bitrate(probe(src).height)
+    if s.hw_encoder:
+        return _hw_video_args(s.hw_encoder, bitrate) + [
+            *_audio_args(s, "aac"),
+            "-movflags", "+faststart",
+        ] + _loop_args(s)
     return [
         "-c:v", "libx264",
         "-preset", s.preset,
@@ -309,7 +414,34 @@ def export_clip(
     on_log: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Path:
-    """Рендерит кусок видео. Прогресс считаем по time= в выводе ffmpeg."""
+    """Рендерит кусок видео. Прогресс считаем по time= в выводе ffmpeg.
+
+    Если видеокарта отказала на середине (драйвер, занятый движок, сеанс без
+    доступа к железу), повторяем на процессоре: лучше дольше, чем никак.
+    """
+    if settings.hw_encoder:
+        try:
+            return _run_export(src, dst, settings, on_progress, on_log, should_cancel)
+        except ExportCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 — вторая попытка всё равно честнее
+            if on_log:
+                on_log(f"{hw_encoder_label(settings.hw_encoder)} не справился "
+                       f"({str(exc).splitlines()[0]}) — повторяю на процессоре.")
+            settings = replace(settings, hw_encoder="")
+            if on_progress:
+                on_progress(0.0)
+    return _run_export(src, dst, settings, on_progress, on_log, should_cancel)
+
+
+def _run_export(
+    src: Path,
+    dst: Path,
+    settings: ExportSettings,
+    on_progress: Optional[Callable[[float], None]] = None,
+    on_log: Optional[Callable[[str], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> Path:
     cmd = build_export_command(src, dst, settings)
     total = max(0.001, settings.end - settings.start)
     if on_log:
